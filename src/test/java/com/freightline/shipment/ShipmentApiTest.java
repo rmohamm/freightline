@@ -144,6 +144,59 @@ class ShipmentApiTest {
     }
 
     @Test
+    void rejectsEventsAfterDeliveredWithoutChangingShipment() throws Exception {
+        long id = createShipment();
+        postEvent(id, "DELIVERED").andExpect(status().isCreated());
+
+        postEvent(id, "IN_TRANSIT")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.detail").value("Cannot move shipment from DELIVERED to IN_TRANSIT"));
+        postEvent(id, "DELIVERED").andExpect(status().isConflict());
+        postEvent(id, "EXCEPTION").andExpect(status().isConflict());
+
+        mvc.perform(get("/api/shipments/{id}", id))
+                .andExpect(jsonPath("$.status").value("DELIVERED"));
+        mvc.perform(get("/api/shipments/{id}/history", id))
+                .andExpect(jsonPath("$", hasSize(2)));
+    }
+
+    @Test
+    void rejectsMovingBackwards() throws Exception {
+        long id = createShipment();
+        postEvent(id, "IN_TRANSIT").andExpect(status().isCreated());
+
+        postEvent(id, "PICKED_UP").andExpect(status().isConflict());
+        postEvent(id, "CREATED").andExpect(status().isConflict());
+
+        mvc.perform(get("/api/shipments/{id}", id))
+                .andExpect(jsonPath("$.status").value("IN_TRANSIT"));
+        mvc.perform(get("/api/shipments/{id}/history", id))
+                .andExpect(jsonPath("$", hasSize(2)));
+    }
+
+    @Test
+    void allowsSkippingAheadAndDuplicateScans() throws Exception {
+        long id = createShipment();
+        postEvent(id, "PICKED_UP").andExpect(status().isCreated());
+        postEvent(id, "PICKED_UP").andExpect(status().isCreated());
+        postEvent(id, "OUT_FOR_DELIVERY").andExpect(status().isCreated());
+
+        mvc.perform(get("/api/shipments/{id}/history", id))
+                .andExpect(jsonPath("$", hasSize(4)));
+    }
+
+    @Test
+    void exceptionCanResumeToAnyStatusExceptCreated() throws Exception {
+        long id = createShipment();
+        postEvent(id, "IN_TRANSIT").andExpect(status().isCreated());
+        postEvent(id, "EXCEPTION").andExpect(status().isCreated());
+        postEvent(id, "CREATED").andExpect(status().isConflict());
+        postEvent(id, "PICKED_UP").andExpect(status().isCreated());
+        postEvent(id, "EXCEPTION").andExpect(status().isCreated());
+        postEvent(id, "DELIVERED").andExpect(status().isCreated());
+    }
+
+    @Test
     void listsShipments() throws Exception {
         long id = createShipment();
 
@@ -164,6 +217,12 @@ class ShipmentApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[*].trackingNumber", hasItem(trackingNumber)))
                 .andExpect(jsonPath("$[*].carrierName", hasItem("Redline Logistics")));
+    }
+
+    private org.springframework.test.web.servlet.ResultActions postEvent(long id, String status) throws Exception {
+        return mvc.perform(post("/api/shipments/{id}/events", id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"status\": \"" + status + "\", \"location\": \"Memphis, TN\"}"));
     }
 
     private long createShipment() throws Exception {

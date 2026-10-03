@@ -2,6 +2,7 @@ package com.freightline.web;
 
 import java.time.DateTimeException;
 
+import com.freightline.shipment.InvalidStatusTransitionException;
 import com.freightline.shipment.ShipmentNotFoundException;
 
 import org.springframework.http.HttpStatus;
@@ -20,6 +21,11 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ShipmentNotFoundException.class)
     public ProblemDetail handleShipmentNotFound(ShipmentNotFoundException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(InvalidStatusTransitionException.class)
+    public ProblemDetail handleInvalidTransition(InvalidStatusTransitionException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
     }
 
     @ExceptionHandler(DateTimeException.class)

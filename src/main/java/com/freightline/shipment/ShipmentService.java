@@ -71,6 +71,9 @@ public class ShipmentService {
     public ShipmentEventResponse addEvent(Long shipmentId, AddEventRequest request) {
         Shipment shipment = shipments.findById(shipmentId)
                 .orElseThrow(() -> new ShipmentNotFoundException(shipmentId));
+        if (!shipment.getStatus().canTransitionTo(request.status())) {
+            throw new InvalidStatusTransitionException(shipment.getStatus(), request.status());
+        }
         Instant occurredAt = request.occurredAt() != null ? request.occurredAt() : clock.instant();
 
         ShipmentEvent event = new ShipmentEvent(request.status(), request.location(), request.note(), occurredAt);

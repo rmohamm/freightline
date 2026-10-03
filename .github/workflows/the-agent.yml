@@ -1,6 +1,6 @@
 name: The Agent
 
-# Runner v0: fix one GitHub issue and open a pull request.
+# Runner v0.1: fix one GitHub issue and open a pull request.
 # Start it from the Actions tab: The Agent -> Run workflow -> enter an issue number.
 # See .agent/README.md for how it works and what it needs.
 
@@ -52,7 +52,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -107,12 +107,16 @@ jobs:
       # The engine gets the code and its model credential, and nothing else:
       # no GitHub token is in its environment.
       - name: Run the engine (Claude Code)
+        id: engine
         if: inputs.engine == 'claude'
         timeout-minutes: 35
         env:
           OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          # Strip spaces and line breaks: a token copied from a wrapped terminal line is a common mistake.
+          API_KEY=$(printf '%s' "$API_KEY" | tr -d '[:space:]')
+          OAUTH_TOKEN=$(printf '%s' "$OAUTH_TOKEN" | tr -d '[:space:]')
           if [ -n "$API_KEY" ]; then
             export ANTHROPIC_API_KEY="$API_KEY"
           elif [ -n "$OAUTH_TOKEN" ]; then
@@ -132,10 +136,14 @@ jobs:
             --max-turns "${{ steps.tier.outputs.max_turns }}" \
             --permission-mode dontAsk \
             --permission-prompts none \
-            --allowedTools "Read,Edit,Write,Glob,Grep,Skill,TodoWrite,Bash(mvn *)" \
+            --allowedTools "Read,Edit,Write,Glob,Grep,Skill,TodoWrite,Bash(mvn *),Bash(./mvnw *)" \
             --output-format json > "$OUT/engine-result.json"
           echo "Engine exit code: $?"
           exit 0
+
+      - name: Summarize the engine result
+        if: always() && steps.engine.outcome != 'skipped' && steps.engine.outcome != ''
+        run: python3 .agent/runner.py engine-summary
 
       - name: Verify the change independently
         id: verify

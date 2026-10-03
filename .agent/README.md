@@ -1,4 +1,4 @@
-# The Agent (runner v0)
+# The Agent (runner v0.1)
 
 The Agent fixes a GitHub issue in this repository and opens a pull request, without a human in the loop until review.
 
@@ -23,8 +23,9 @@ It runs as a GitHub Actions workflow (`.github/workflows/the-agent.yml`) that yo
 2. Checks that `main` passes its tests before changing anything.
 3. Copies the tier's skills from `.agent/skills/` into `.claude/skills/` and builds the prompt from `.agent/prompt.md`.
 4. Runs Claude Code headless. The engine can read and edit files and run `mvn`, and nothing else. It has no GitHub token.
-5. Runs the full test suite again itself, rather than trusting the engine's word.
-6. Decides the outcome:
+5. Summarizes the engine's result: any error message and any tool calls the allow-list blocked appear as annotations on the run page and in the run summary.
+6. Runs the full test suite again itself, rather than trusting the engine's word.
+7. Decides the outcome:
 
    | Outcome | What happens |
    |---|---|
@@ -35,7 +36,7 @@ It runs as a GitHub Actions workflow (`.github/workflows/the-agent.yml`) that yo
    | `blocked` | The agent touched `.github/`, `.agent/` or `.claude/`: no pull request, the job fails |
    | `engine_error` | The engine crashed or produced no result: the job fails |
 
-7. Uploads a **run record** (`record.json` plus the prompt, report, and test log) as a workflow artifact. These records are the data for comparing engines, tiers, and processes.
+8. Uploads a **run record** (`record.json` plus the prompt, report, and test log) as a workflow artifact. These records are the data for comparing engines, tiers, and processes.
 
 Pull requests come from branch `the-agent/issue-<number>`, authored by The Agent's GitHub App. A rerun on the same issue updates the same branch and pull request.
 
@@ -47,7 +48,7 @@ Repository secrets:
 |---|---|
 | `AGENT_APP_ID` | The App ID of The Agent's GitHub App |
 | `AGENT_APP_PRIVATE_KEY` | The app's private key (the full `.pem` contents) |
-| `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` | The engine's model credential. If both are set, the API key is used |
+| `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` | The engine's model credential. If both are set, the API key is used. Stray spaces and line breaks are removed automatically |
 
 The GitHub App needs **Contents**, **Issues**, and **Pull requests** set to read and write, and must be installed on this repository.
 

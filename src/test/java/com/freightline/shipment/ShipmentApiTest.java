@@ -149,7 +149,57 @@ class ShipmentApiTest {
 
         mvc.perform(get("/api/shipments"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[*].id", hasItem((int) id)));
+                .andExpect(jsonPath("$.content[*].id", hasItem((int) id)));
+    }
+
+    @Test
+    void paginatesShipmentsWithDefaults() throws Exception {
+        createShipment();
+
+        mvc.perform(get("/api/shipments"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.totalElements").isNumber())
+                .andExpect(jsonPath("$.totalPages").isNumber());
+    }
+
+    @Test
+    void paginatesShipmentsNewestFirst() throws Exception {
+        long first = createShipment();
+        long second = createShipment();
+
+        mvc.perform(get("/api/shipments").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.content[0].id").value(second))
+                .andExpect(jsonPath("$.content[1].id").value(first));
+    }
+
+    @Test
+    void returnsRequestedPageWithTotals() throws Exception {
+        createShipment();
+        createShipment();
+        createShipment();
+
+        MvcResult all = mvc.perform(get("/api/shipments").param("size", "1")).andReturn();
+        int total = ((Number) JsonPath.read(all.getResponse().getContentAsString(), "$.totalElements")).intValue();
+        int pages = ((Number) JsonPath.read(all.getResponse().getContentAsString(), "$.totalPages")).intValue();
+
+        org.junit.jupiter.api.Assertions.assertTrue(total >= 3);
+        org.junit.jupiter.api.Assertions.assertEquals(total, pages);
+
+        mvc.perform(get("/api/shipments").param("page", "1").param("size", "1"))
+                .andExpect(jsonPath("$.page").value(1))
+                .andExpect(jsonPath("$.content", hasSize(1)));
+    }
+
+    @Test
+    void capsPageSizeAtOneHundred() throws Exception {
+        mvc.perform(get("/api/shipments").param("size", "1000"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.size").value(100));
     }
 
     @Test

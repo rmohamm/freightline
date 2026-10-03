@@ -1,5 +1,6 @@
 package com.freightline.rating;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -28,6 +29,21 @@ class RateApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.carrierCode").value("PRCL"))
                 .andExpect(jsonPath("$.total").value(27.0));
+    }
+
+    @Test
+    void quoteAmountsAreRoundedToCents() throws Exception {
+        String body = mvc.perform(post("/api/rates/quote")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"carrierCode": "FSHP", "serviceLevel": "STANDARD", "weightKg": 3}
+                                """))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        assertTrue(body.contains("\"subtotal\":6.30,"), body);
+        assertTrue(body.contains("\"fuelSurcharge\":0.50,"), body);
+        assertTrue(body.contains("\"total\":6.80}"), body);
     }
 
     @Test

@@ -49,6 +49,29 @@ class ShipmentApiTest {
     }
 
     @Test
+    void returnsNotFoundForUnknownShipment() throws Exception {
+        mvc.perform(get("/api/shipments/999999"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Shipment 999999 not found"));
+    }
+
+    @Test
+    void returnsNotFoundForUnknownShipmentHistory() throws Exception {
+        mvc.perform(get("/api/shipments/999999/history"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Shipment 999999 not found"));
+    }
+
+    @Test
+    void returnsNotFoundWhenAddingEventToUnknownShipment() throws Exception {
+        mvc.perform(post("/api/shipments/999999/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\": \"IN_TRANSIT\", \"location\": \"Dallas, TX\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Shipment 999999 not found"));
+    }
+
+    @Test
     void rejectsBlankOrigin() throws Exception {
         mvc.perform(post("/api/shipments")
                         .contentType(MediaType.APPLICATION_JSON)

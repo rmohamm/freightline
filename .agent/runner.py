@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent
-RUNNER_VERSION = "v0.3.1"
+RUNNER_VERSION = "v0.3.2"
 
 # Tier -> process depth (Superpowers skills, turn budget, plan first). The same for every engine,
 # so a comparison between engines only varies the engine.
@@ -249,30 +249,37 @@ def find_json_object(text):
 
 
 # Gemini API standard paid-tier prices in USD per million tokens, as published at
-# https://ai.google.dev/gemini-api/docs/pricing (checked October 2026). Pro uses the <=200k-token prompt rate.
-# Flash prices double on January 1, 2027: update this table then. Unknown models get no cost estimate.
+# https://ai.google.dev/gemini-api/docs/pricing (checked October 2026; text input; Pro at its <=200k-token rate).
+# Gemini CLI also calls small helper models (Flash-Lite) in the background, so they need prices too.
+# The 3.6-3.8 Flash prices double on January 1, 2027: update this table then.
 GEMINI_PRICES = {
     "gemini-3.8-flash": {"input": 0.75, "cached": 0.075, "output": 3.75},
+    "gemini-3.7-flash": {"input": 0.75, "cached": 0.075, "output": 3.75},
+    "gemini-3.6-flash": {"input": 0.75, "cached": 0.075, "output": 3.75},
+    "gemini-3.5-flash": {"input": 1.50, "cached": 0.15, "output": 9.00},
+    "gemini-3.5-flash-lite": {"input": 0.30, "cached": 0.03, "output": 2.50},
+    "gemini-3.1-flash-lite": {"input": 0.25, "cached": 0.025, "output": 1.50},
+    "gemini-3-flash-preview": {"input": 0.50, "cached": 0.05, "output": 3.00},
     "gemini-3.1-pro": {"input": 2.00, "cached": 0.20, "output": 12.00},
 }
 
 
 def gemini_price(model_name):
-    for prefix, price in GEMINI_PRICES.items():
-        if model_name.startswith(prefix):
-            return price
-    return None
+    """Price for a model ID, matching the longest known prefix (so "gemini-3.5-flash-lite" isn't priced as Flash)."""
+    matches = [prefix for prefix in GEMINI_PRICES if model_name.startswith(prefix)]
+    return GEMINI_PRICES[max(matches, key=len)] if matches else None
 
 
 def gemini_usage(stats):
-    """Token totals by type across models, and a cost estimate (None if any model's price is unknown).
+    """Token totals by type, per model, and a cost estimate.
 
     Gemini CLI counts `prompt` as all input including cached input, `cached` as the cached part, `input`
     as the uncached part, `candidates` as output, `thoughts` as thinking (billed as output), and `tool` as
-    extra input for tool use.
+    extra input for tool use. Models missing from GEMINI_PRICES are listed in `unpriced_models`, and the
+    estimate then covers only the priced models.
     """
     usage = {"requests": 0, "uncached_input": 0, "cached_input": 0, "output": 0, "thinking": 0, "tool_input": 0,
-             "total": 0}
+             "total": 0, "models": {}, "unpriced_models": []}
     cost = 0.0
     for name, model in ((stats or {}).get("models") or {}).items():
         api = model.get("api") or {}
@@ -280,7 +287,8 @@ def gemini_usage(stats):
         cached = tok.get("cached") or 0
         uncached = tok.get("input") if tok.get("input") is not None else max(0, (tok.get("prompt") or 0) - cached)
         out, thoughts, tool = tok.get("candidates") or 0, tok.get("thoughts") or 0, tok.get("tool") or 0
-        usage["requests"] += api.get("totalRequests") or 0
+        requests = api.get("totalRequests") or 0
+        usage["requests"] += requests
         usage["uncached_input"] += uncached
         usage["cached_input"] += cached
         usage["output"] += out
@@ -288,12 +296,26 @@ def gemini_usage(stats):
         usage["tool_input"] += tool
         usage["total"] += tok.get("total") or 0
         price = gemini_price(name)
-        if price is None or cost is None:
-            cost = None
-            continue
-        cost += ((uncached + tool) * price["input"] + cached * price["cached"]
-                 + (out + thoughts) * price["output"]) / 1_000_000
-    return usage, (round(cost, 4) if cost is not None and usage["requests"] else None)
+        model_cost = None
+        if price is None:
+            usage["unpriced_models"].append(name)
+        else:
+            model_cost = ((uncached + tool) * price["input"] + cached * price["cached"]
+                          + (out + thoughts) * price["output"]) / 1_000_000
+            cost += model_cost
+        usage["models"][name] = {"requests": requests, "tokens": tok.get("total") or 0,
+                                 "cost": round(model_cost, 4) if model_cost is not None else None}
+    return usage, (round(cost, 4) if usage["requests"] and len(usage["unpriced_models"]) < len(usage["models"]) else None)
+
+
+def count_rate_limit_retries(stderr):
+    """How often Gemini CLI waited and retried because of a quota or rate limit (429).
+
+    Gemini CLI logs each failed attempt as "Attempt N failed: <reason>", with the reason on the same line,
+    for example "You exceeded your current quota". Network failures ("fetch failed") aren't counted.
+    """
+    return sum(1 for line in stderr.splitlines()
+               if re.search(r"Attempt \d+ failed", line) and re.search(r"quota|rate.?limit|429|exhausted", line, re.I))
 
 
 def gemini_result(out):
@@ -323,6 +345,7 @@ def gemini_result(out):
         error = f"The engine exited with code {exit_code}" + (f": {tail}" if tail else ".")
     stats = raw.get("stats") or {}
     usage, cost = gemini_usage(stats)
+    usage["rate_limit_retries"] = count_rate_limit_retries(read_text(out / "engine-stderr.log"))
     failed_tools = (stats.get("tools") or {}).get("totalFail") or 0
     denied = [f"{failed_tools} tool call(s) failed. Gemini doesn't report which, or whether the allow-list refused them"] \
         if failed_tools else []
@@ -366,12 +389,23 @@ def cmd_engine_summary():
         lines += [f"- `{d}`" for d in result["denied"]]
     usage = result.get("usage")
     if usage:
-        cost = f"${result['cost']:.4f}" if result["cost"] is not None else "unknown (model not in the price table)"
-        breakdown = (f"{usage['requests']} requests; tokens: {usage['uncached_input']:,} input, "
+        unpriced = usage.get("unpriced_models") or []
+        if result["cost"] is None:
+            cost = "unknown (no model in the price table)"
+        else:
+            cost = f"${result['cost']:.4f}" + (f", excluding unpriced {', '.join(unpriced)}" if unpriced else "")
+        per_model = "; ".join(f"{name}: {m['requests']} requests" for name, m in (usage.get("models") or {}).items())
+        breakdown = (f"{usage['requests']} requests ({per_model}); tokens: {usage['uncached_input']:,} input, "
                      f"{usage['cached_input']:,} cached input, {usage['output']:,} output, "
                      f"{usage['thinking']:,} thinking, {usage['tool_input']:,} tool input; estimated cost {cost}")
         print(f"::notice title=Engine usage::{breakdown}")
         lines += ["", f"**Usage:** {breakdown}"]
+        retries = usage.get("rate_limit_retries") or 0
+        if retries:
+            note = (f"The engine was rate-limited {retries} time(s) and waited before retrying, so its engine time "
+                    "includes waiting. Compare timings only between runs that weren't throttled.")
+            print(f"::warning title=Rate limited::{note}")
+            lines += ["", f"**Rate limited:** {note}"]
     text = "\n".join(lines) + "\n"
     print(text)
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -456,7 +490,13 @@ def cmd_report():
                      f"{tests['failures']} failures, {tests['errors']} errors")
     else:
         test_line = "Passed" if tests_passed else "FAILED (no test summary found)"
-    cost_line = f"${result['cost']:.2f} (estimate)" if result["cost"] is not None else "n/a"
+    usage = result.get("usage") or {}
+    if result["cost"] is None:
+        cost_line = "n/a"
+    elif usage.get("unpriced_models"):
+        cost_line = f"${result['cost']:.2f}+ (estimate; excludes {', '.join(usage['unpriced_models'])})"
+    else:
+        cost_line = f"${result['cost']:.2f} (estimate)"
     turns = result["turns"] if result["turns"] is not None else "n/a"
     tokens_line = f"{result['tokens']:,}" if result["tokens"] else "n/a"
 
@@ -467,7 +507,8 @@ def cmd_report():
         ("Agent's status", status),
         ("Independent test run", test_line),
         ("Changes", f"{len(files)} files, +{additions} / -{deletions}"),
-        ("Engine time", f"{format_duration(result['duration_ms'])}, {turns} turns"),
+        ("Engine time", f"{format_duration(result['duration_ms'])}, {turns} turns"
+                        + (f" (rate-limited {usage['rate_limit_retries']}x)" if usage.get("rate_limit_retries") else "")),
         ("Tokens", tokens_line),
         ("Cost", cost_line),
     ]

@@ -82,6 +82,9 @@ public class Shipment {
     }
 
     public void addEvent(ShipmentEvent event) {
+        if (!this.status.canTransitionTo(event.getStatus())) {
+            throw new InvalidStatusTransitionException(this.status, event.getStatus());
+        }
         event.setShipment(this);
         events.add(event);
         this.status = event.getStatus();

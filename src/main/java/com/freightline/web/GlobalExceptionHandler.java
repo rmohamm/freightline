@@ -7,6 +7,8 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import com.freightline.shipment.InvalidStatusTransitionException;
+
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -18,5 +20,10 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(DateTimeException.class)
     public ProblemDetail handleBadTimeZone(DateTimeException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Invalid time zone: " + ex.getMessage());
+    }
+
+    @ExceptionHandler(InvalidStatusTransitionException.class)
+    public ProblemDetail handleInvalidStatusTransition(InvalidStatusTransitionException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
     }
 }

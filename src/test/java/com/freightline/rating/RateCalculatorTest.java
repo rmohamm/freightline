@@ -35,18 +35,30 @@ class RateCalculatorTest {
     void standardQuoteAppliesRateAndFuelSurcharge() {
         RateQuote quote = calculator.quote("PRCL", ServiceLevel.STANDARD, 10);
 
-        assertEquals(25.0, quote.subtotal());
-        assertEquals(2.0, quote.fuelSurcharge());
-        assertEquals(27.0, quote.total());
+        assertEquals(new BigDecimal("25.00"), quote.subtotal());
+        assertEquals(new BigDecimal("2.00"), quote.fuelSurcharge());
+        assertEquals(new BigDecimal("27.00"), quote.total());
     }
 
     @Test
     void expressQuoteAppliesServiceLevelMultiplier() {
         RateQuote quote = calculator.quote("RDLN", ServiceLevel.EXPRESS, 4);
 
-        assertEquals(10.5, quote.subtotal());
-        assertEquals(0.84, quote.fuelSurcharge());
-        assertEquals(11.34, quote.total());
+        assertEquals(new BigDecimal("10.50"), quote.subtotal());
+        assertEquals(new BigDecimal("0.84"), quote.fuelSurcharge());
+        assertEquals(new BigDecimal("11.34"), quote.total());
+    }
+
+    @Test
+    void amountsAreRoundedToCentsHalfUp() {
+        when(carriers.findById("FSHP"))
+                .thenReturn(Optional.of(new Carrier("FSHP", "FastShip", new BigDecimal("2.10"))));
+
+        RateQuote quote = calculator.quote("FSHP", ServiceLevel.STANDARD, 3);
+
+        assertEquals(new BigDecimal("6.30"), quote.subtotal());
+        assertEquals(new BigDecimal("0.50"), quote.fuelSurcharge());
+        assertEquals(new BigDecimal("6.80"), quote.total());
     }
 
     @Test

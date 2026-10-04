@@ -6,6 +6,9 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,11 +17,15 @@ import com.freightline.carrier.CarrierRepository;
 import com.freightline.shipment.ShipmentDtos.AddEventRequest;
 import com.freightline.shipment.ShipmentDtos.CreateShipmentRequest;
 import com.freightline.shipment.ShipmentDtos.ShipmentEventResponse;
+import com.freightline.shipment.ShipmentDtos.ShipmentPage;
 import com.freightline.shipment.ShipmentDtos.ShipmentResponse;
 import com.freightline.shipment.ShipmentDtos.ShipmentSummary;
 
 @Service
 public class ShipmentService {
+
+    static final int DEFAULT_PAGE_SIZE = 20;
+    static final int MAX_PAGE_SIZE = 100;
 
     private final ShipmentRepository shipments;
     private final CarrierRepository carriers;
@@ -61,10 +68,18 @@ public class ShipmentService {
     }
 
     @Transactional(readOnly = true)
-    public List<ShipmentResponse> list() {
-        return shipments.findAll().stream()
-                .map(ShipmentResponse::from)
-                .toList();
+    public ShipmentPage list(int page, int size) {
+        int safePage = Math.max(page, 0);
+        int safeSize = size < 1 ? DEFAULT_PAGE_SIZE : Math.min(size, MAX_PAGE_SIZE);
+        // id breaks ties between shipments created at the same instant
+        Sort newestFirst = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
+        Page<Shipment> result = shipments.findAll(PageRequest.of(safePage, safeSize, newestFirst));
+        return new ShipmentPage(
+                result.getContent().stream().map(ShipmentResponse::from).toList(),
+                safePage,
+                safeSize,
+                result.getTotalElements(),
+                result.getTotalPages());
     }
 
     @Transactional

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent
-RUNNER_VERSION = "v0.3"
+RUNNER_VERSION = "v0.3.1"
 
 # Tier -> process depth (Superpowers skills, turn budget, plan first). The same for every engine,
 # so a comparison between engines only varies the engine.
@@ -232,10 +232,75 @@ def claude_result(out):
             "tokens": tokens, "denied": denied, "exit_code": read_exit_code(out)}
 
 
+def find_json_object(text):
+    """The last JSON object embedded in free text (Gemini prints its error JSON to stderr, between log lines)."""
+    decoder = json.JSONDecoder()
+    found = None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and ("error" in value or "response" in value):
+            found = value
+    return found
+
+
+# Gemini API standard paid-tier prices in USD per million tokens, as published at
+# https://ai.google.dev/gemini-api/docs/pricing (checked October 2026). Pro uses the <=200k-token prompt rate.
+# Flash prices double on January 1, 2027: update this table then. Unknown models get no cost estimate.
+GEMINI_PRICES = {
+    "gemini-3.8-flash": {"input": 0.75, "cached": 0.075, "output": 3.75},
+    "gemini-3.1-pro": {"input": 2.00, "cached": 0.20, "output": 12.00},
+}
+
+
+def gemini_price(model_name):
+    for prefix, price in GEMINI_PRICES.items():
+        if model_name.startswith(prefix):
+            return price
+    return None
+
+
+def gemini_usage(stats):
+    """Token totals by type across models, and a cost estimate (None if any model's price is unknown).
+
+    Gemini CLI counts `prompt` as all input including cached input, `cached` as the cached part, `input`
+    as the uncached part, `candidates` as output, `thoughts` as thinking (billed as output), and `tool` as
+    extra input for tool use.
+    """
+    usage = {"requests": 0, "uncached_input": 0, "cached_input": 0, "output": 0, "thinking": 0, "tool_input": 0,
+             "total": 0}
+    cost = 0.0
+    for name, model in ((stats or {}).get("models") or {}).items():
+        api = model.get("api") or {}
+        tok = model.get("tokens") or {}
+        cached = tok.get("cached") or 0
+        uncached = tok.get("input") if tok.get("input") is not None else max(0, (tok.get("prompt") or 0) - cached)
+        out, thoughts, tool = tok.get("candidates") or 0, tok.get("thoughts") or 0, tok.get("tool") or 0
+        usage["requests"] += api.get("totalRequests") or 0
+        usage["uncached_input"] += uncached
+        usage["cached_input"] += cached
+        usage["output"] += out
+        usage["thinking"] += thoughts
+        usage["tool_input"] += tool
+        usage["total"] += tok.get("total") or 0
+        price = gemini_price(name)
+        if price is None or cost is None:
+            cost = None
+            continue
+        cost += ((uncached + tool) * price["input"] + cached * price["cached"]
+                 + (out + thoughts) * price["output"]) / 1_000_000
+    return usage, (round(cost, 4) if cost is not None and usage["requests"] else None)
+
+
 def gemini_result(out):
     # Gemini CLI's JSON output is {session_id, response, stats, error}. stats.models.<model> holds request
     # counts and token totals; stats.tools holds tool-call counts. Exit code 53 means the turn cap was hit.
-    raw = load_json(out / "engine-result.json")
+    # When it fails early it prints the same JSON to stderr instead of stdout, so look there too.
+    raw = load_json(out / "engine-result.json") or find_json_object(read_text(out / "engine-stderr.log"))
     exit_code = read_exit_code(out)
     if not raw:
         result = generic_result(out)
@@ -245,23 +310,26 @@ def gemini_result(out):
     error = None
     if raw.get("error"):
         err = raw["error"]
-        message = err.get("message") if isinstance(err, dict) else str(err)
-        kind = err.get("type") if isinstance(err, dict) else None
-        error = f"{message} ({kind})" if message and kind else (message or "Unknown engine error.")
+        if isinstance(err, dict):
+            message = str(err.get("message") or "").strip()
+            details = ", ".join(str(x) for x in (err.get("type"), f"code {err['code']}" if err.get("code") else None) if x)
+            error = f"{message} ({details})" if message and details else (message or details or "Unknown engine error.")
+        else:
+            error = str(err)
     elif exit_code == 53:
         error = "The engine hit its turn limit before finishing (exit code 53)."
     elif exit_code not in (0, None):
         tail = stderr_tail(out)
         error = f"The engine exited with code {exit_code}" + (f": {tail}" if tail else ".")
     stats = raw.get("stats") or {}
-    models = stats.get("models") or {}
-    requests = sum((m.get("api") or {}).get("totalRequests") or 0 for m in models.values())
-    tokens = sum((m.get("tokens") or {}).get("total") or 0 for m in models.values())
+    usage, cost = gemini_usage(stats)
     failed_tools = (stats.get("tools") or {}).get("totalFail") or 0
-    denied = [f"{failed_tools} tool call(s) failed (Gemini doesn't report which were refused)"] if failed_tools else []
-    return {"ok": error is None, "error": error, "turns": requests or None,
+    denied = [f"{failed_tools} tool call(s) failed. Gemini doesn't report which, or whether the allow-list refused them"] \
+        if failed_tools else []
+    return {"ok": error is None, "error": error, "turns": usage["requests"] or None,
             "duration_ms": read_int(out, "engine-duration-ms"),
-            "cost": None, "tokens": tokens or None, "denied": denied, "exit_code": exit_code}
+            "cost": cost, "tokens": usage["total"] or None, "usage": usage if usage["requests"] else None,
+            "denied": denied, "exit_code": exit_code}
 
 
 ENGINE_ADAPTERS = {"claude": claude_result, "gemini": gemini_result}
@@ -296,6 +364,14 @@ def cmd_engine_summary():
               + "; ".join(result["denied"])[:900])
         lines += ["", f"**Blocked by the tool allow-list ({len(result['denied'])}):**", ""]
         lines += [f"- `{d}`" for d in result["denied"]]
+    usage = result.get("usage")
+    if usage:
+        cost = f"${result['cost']:.4f}" if result["cost"] is not None else "unknown (model not in the price table)"
+        breakdown = (f"{usage['requests']} requests; tokens: {usage['uncached_input']:,} input, "
+                     f"{usage['cached_input']:,} cached input, {usage['output']:,} output, "
+                     f"{usage['thinking']:,} thinking, {usage['tool_input']:,} tool input; estimated cost {cost}")
+        print(f"::notice title=Engine usage::{breakdown}")
+        lines += ["", f"**Usage:** {breakdown}"]
     text = "\n".join(lines) + "\n"
     print(text)
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -490,6 +566,7 @@ def cmd_report():
         "engine_turns": result["turns"],
         "cost_usd_estimate": result["cost"],
         "tokens": result["tokens"],
+        "token_usage": result.get("usage"),
         "engine_error": result["error"],
         "denied_tool_calls": result["denied"],
         "pr_url": None,

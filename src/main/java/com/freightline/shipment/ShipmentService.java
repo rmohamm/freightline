@@ -57,7 +57,7 @@ public class ShipmentService {
 
     @Transactional(readOnly = true)
     public ShipmentResponse get(Long id) {
-        return ShipmentResponse.from(shipments.findById(id).orElseThrow());
+        return ShipmentResponse.from(shipments.findById(id).orElseThrow(() -> new ShipmentNotFoundException(id)));
     }
 
     @Transactional(readOnly = true)
@@ -69,7 +69,8 @@ public class ShipmentService {
 
     @Transactional
     public ShipmentEventResponse addEvent(Long shipmentId, AddEventRequest request) {
-        Shipment shipment = shipments.findById(shipmentId).orElseThrow();
+        Shipment shipment = shipments.findById(shipmentId)
+                .orElseThrow(() -> new ShipmentNotFoundException(shipmentId));
         Instant occurredAt = request.occurredAt() != null ? request.occurredAt() : clock.instant();
 
         ShipmentEvent event = new ShipmentEvent(request.status(), request.location(), request.note(), occurredAt);
@@ -81,7 +82,8 @@ public class ShipmentService {
 
     @Transactional(readOnly = true)
     public List<ShipmentEventResponse> history(Long shipmentId) {
-        Shipment shipment = shipments.findById(shipmentId).orElseThrow();
+        Shipment shipment = shipments.findById(shipmentId)
+                .orElseThrow(() -> new ShipmentNotFoundException(shipmentId));
         return shipment.getEvents().stream()
                 .map(ShipmentEventResponse::from)
                 .toList();

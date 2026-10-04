@@ -4,6 +4,7 @@
 Subcommands:
   check-issue ISSUE_JSON [yes|no] fail unless the issue is an open issue (not a PR); "yes" also allows closed
   tier TIER ENGINE                print tier settings for that engine as key=value lines for $GITHUB_OUTPUT
+  gemini-settings TIER            print the Gemini CLI settings.json for a run
   prompt ISSUE_JSON TIER          print the engine prompt built from prompt.md
   engine-summary                  print the engine's result, error and blocked tool calls, and
                                   raise them as annotations (paths come from env vars)
@@ -20,7 +21,7 @@ import sys
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent
-RUNNER_VERSION = "v0.2"
+RUNNER_VERSION = "v0.3"
 
 # Tier -> process depth (Superpowers skills, turn budget, plan first). The same for every engine,
 # so a comparison between engines only varies the engine.
@@ -43,11 +44,18 @@ TIERS = {
 }
 
 # Engine -> model for each tier.
+# Gemini's free API tier only serves Flash, so `deep` (Pro) needs billing enabled on the Google Cloud project.
 ENGINE_MODELS = {
     "claude": {"fast": "haiku", "standard": "sonnet", "deep": "opus"},
+    "gemini": {"fast": "flash", "standard": "flash", "deep": "pro"},
 }
 
-PROTECTED_PREFIXES = (".github/", ".agent/", ".claude/")
+# Gemini CLI's built-in tools that a run may use. Anything else (web search, web fetch, memory, other
+# shell commands) doesn't exist for the model. Mirrors the Claude allow-list in the workflow.
+GEMINI_TOOLS = ["read_file", "read_many_files", "write_file", "replace", "glob", "grep_search",
+                "list_directory", "write_todos", "activate_skill", "run_shell_command(mvn)"]
+
+PROTECTED_PREFIXES = (".github/", ".agent/", ".claude/", ".gemini/")
 WARN_FILES = ("pom.xml",)
 VALID_STATUSES = ("FIXED", "NEEDS_INFO", "GAVE_UP")
 
@@ -115,6 +123,18 @@ def cmd_tier(name, engine):
     print(f"skills={','.join(tier['skills'])}")
 
 
+def cmd_gemini_settings(tier_name):
+    """User-level Gemini CLI settings for a run: API-key auth, AGENTS.md as context, a tool allow-list, a turn cap."""
+    tier = get_tier(tier_name)
+    settings = {
+        "security": {"auth": {"selectedType": "gemini-api-key"}},
+        "context": {"fileName": ["AGENTS.md"]},
+        "model": {"maxSessionTurns": tier["max_turns"]},
+        "tools": {"sandbox": False, "core": GEMINI_TOOLS},
+    }
+    print(json.dumps(settings, indent=2))
+
+
 # --- prompt ----------------------------------------------------------------
 
 def build_prompt(issue, tier_name):
@@ -154,12 +174,17 @@ def cmd_prompt(issue_path, tier_name):
 # --- engine adapters -------------------------------------------------------
 #
 # Each engine reports its result in its own format. An adapter turns that into one common shape:
-#   {ok, error, turns, duration_ms, cost, denied, exit_code}
+#   {ok, error, turns, duration_ms, cost, tokens, denied, exit_code}
 # Everything after this point (outcome, PR body, run record) only uses the common shape.
+# The workflow also times every engine itself (engine-duration-ms), used when an engine doesn't report it.
+
+def read_int(out, name):
+    text = read_text(out / name).strip()
+    return int(text) if text.lstrip("-").isdigit() else None
+
 
 def read_exit_code(out):
-    text = read_text(out / "engine-exit-code").strip()
-    return int(text) if text.lstrip("-").isdigit() else None
+    return read_int(out, "engine-exit-code")
 
 
 def stderr_tail(out, lines=5):
@@ -176,8 +201,8 @@ def generic_result(out):
     elif exit_code != 0:
         tail = stderr_tail(out)
         error = f"The engine exited with code {exit_code}" + (f": {tail}" if tail else ".")
-    return {"ok": error is None, "error": error, "turns": None, "duration_ms": None,
-            "cost": None, "denied": [], "exit_code": exit_code}
+    return {"ok": error is None, "error": error, "turns": None, "duration_ms": read_int(out, "engine-duration-ms"),
+            "cost": None, "tokens": None, "denied": [], "exit_code": exit_code}
 
 
 def claude_result(out):
@@ -197,14 +222,49 @@ def claude_result(out):
         tool_input = item.get("tool_input") or {}
         detail = tool_input.get("command") or tool_input.get("file_path") or tool_input.get("path") or ""
         denied.append(f"{tool}: {short(detail)}" if detail else tool)
+    usage = raw.get("usage") or {}
+    tokens = sum(usage.get(k) or 0 for k in ("input_tokens", "output_tokens",
+                                             "cache_creation_input_tokens", "cache_read_input_tokens")) or None
     cost = raw.get("total_cost_usd")
     return {"ok": error is None, "error": error, "turns": raw.get("num_turns"),
-            "duration_ms": raw.get("duration_ms"),
+            "duration_ms": raw.get("duration_ms") or read_int(out, "engine-duration-ms"),
             "cost": cost if isinstance(cost, (int, float)) else None,
-            "denied": denied, "exit_code": read_exit_code(out)}
+            "tokens": tokens, "denied": denied, "exit_code": read_exit_code(out)}
 
 
-ENGINE_ADAPTERS = {"claude": claude_result}
+def gemini_result(out):
+    # Gemini CLI's JSON output is {session_id, response, stats, error}. stats.models.<model> holds request
+    # counts and token totals; stats.tools holds tool-call counts. Exit code 53 means the turn cap was hit.
+    raw = load_json(out / "engine-result.json")
+    exit_code = read_exit_code(out)
+    if not raw:
+        result = generic_result(out)
+        if exit_code == 53:
+            result["error"] = "The engine hit its turn limit before finishing (exit code 53)."
+        return result
+    error = None
+    if raw.get("error"):
+        err = raw["error"]
+        message = err.get("message") if isinstance(err, dict) else str(err)
+        kind = err.get("type") if isinstance(err, dict) else None
+        error = f"{message} ({kind})" if message and kind else (message or "Unknown engine error.")
+    elif exit_code == 53:
+        error = "The engine hit its turn limit before finishing (exit code 53)."
+    elif exit_code not in (0, None):
+        tail = stderr_tail(out)
+        error = f"The engine exited with code {exit_code}" + (f": {tail}" if tail else ".")
+    stats = raw.get("stats") or {}
+    models = stats.get("models") or {}
+    requests = sum((m.get("api") or {}).get("totalRequests") or 0 for m in models.values())
+    tokens = sum((m.get("tokens") or {}).get("total") or 0 for m in models.values())
+    failed_tools = (stats.get("tools") or {}).get("totalFail") or 0
+    denied = [f"{failed_tools} tool call(s) failed (Gemini doesn't report which were refused)"] if failed_tools else []
+    return {"ok": error is None, "error": error, "turns": requests or None,
+            "duration_ms": read_int(out, "engine-duration-ms"),
+            "cost": None, "tokens": tokens or None, "denied": denied, "exit_code": exit_code}
+
+
+ENGINE_ADAPTERS = {"claude": claude_result, "gemini": gemini_result}
 
 
 def engine_result(engine, out):
@@ -322,6 +382,7 @@ def cmd_report():
         test_line = "Passed" if tests_passed else "FAILED (no test summary found)"
     cost_line = f"${result['cost']:.2f} (estimate)" if result["cost"] is not None else "n/a"
     turns = result["turns"] if result["turns"] is not None else "n/a"
+    tokens_line = f"{result['tokens']:,}" if result["tokens"] else "n/a"
 
     facts = [
         ("Engine", f"{engine} (`{model}`)"),
@@ -331,6 +392,7 @@ def cmd_report():
         ("Independent test run", test_line),
         ("Changes", f"{len(files)} files, +{additions} / -{deletions}"),
         ("Engine time", f"{format_duration(result['duration_ms'])}, {turns} turns"),
+        ("Tokens", tokens_line),
         ("Cost", cost_line),
     ]
     table = "| | |\n|---|---|\n" + "\n".join(f"| {k} | {v} |" for k, v in facts)
@@ -427,6 +489,7 @@ def cmd_report():
         "engine_duration_ms": result["duration_ms"],
         "engine_turns": result["turns"],
         "cost_usd_estimate": result["cost"],
+        "tokens": result["tokens"],
         "engine_error": result["error"],
         "denied_tool_calls": result["denied"],
         "pr_url": None,
@@ -454,6 +517,8 @@ def main(argv):
         cmd_check_issue(*args)
     elif command == "tier" and len(args) == 2:
         cmd_tier(args[0], args[1])
+    elif command == "gemini-settings" and len(args) == 1:
+        cmd_gemini_settings(args[0])
     elif command == "prompt" and len(args) == 2:
         cmd_prompt(args[0], args[1])
     elif command == "engine-summary" and not args:

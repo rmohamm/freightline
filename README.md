@@ -31,7 +31,7 @@ mvn test
 | Method | Path | What it does |
 |---|---|---|
 | `POST` | `/api/shipments` | Create a shipment |
-| `GET` | `/api/shipments` | List shipments |
+| `GET` | `/api/shipments` | List shipments, newest first (`page` default 0, `size` default 20, max 100; returns `content`, `page`, `size`, `totalElements`, `totalPages`) |
 | `GET` | `/api/shipments/{id}` | Get one shipment |
 | `POST` | `/api/shipments/{id}/events` | Record a status event |
 | `GET` | `/api/shipments/{id}/history` | Status history for a shipment |

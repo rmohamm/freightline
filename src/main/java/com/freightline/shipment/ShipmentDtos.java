@@ -2,6 +2,7 @@ package com.freightline.shipment;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -53,6 +54,14 @@ public final class ShipmentDtos {
                     s.getCreatedAt(),
                     s.getEstimatedDelivery());
         }
+    }
+
+    public record ShipmentPage(
+            List<ShipmentResponse> content,
+            int page,
+            int size,
+            long totalElements,
+            int totalPages) {
     }
 
     public record ShipmentEventResponse(

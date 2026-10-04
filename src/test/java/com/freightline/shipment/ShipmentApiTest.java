@@ -1,6 +1,8 @@
 package com.freightline.shipment;
 
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -110,7 +112,35 @@ class ShipmentApiTest {
 
         mvc.perform(get("/api/shipments"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[*].id", hasItem((int) id)));
+                .andExpect(jsonPath("$.content[*].id", hasItem((int) id)))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(20));
+    }
+
+    @Test
+    void pagesShipmentsNewestFirst() throws Exception {
+        createShipment();
+        createShipment();
+        long newest = createShipment();
+
+        mvc.perform(get("/api/shipments").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.content[0].id").value(newest))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements", greaterThanOrEqualTo(3)))
+                .andExpect(jsonPath("$.totalPages", greaterThanOrEqualTo(2)));
+    }
+
+    @Test
+    void capsPageSizeAt100() throws Exception {
+        createShipment();
+
+        mvc.perform(get("/api/shipments").param("size", "1000"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.size").value(100))
+                .andExpect(jsonPath("$.content.length()", lessThanOrEqualTo(100)));
     }
 
     @Test

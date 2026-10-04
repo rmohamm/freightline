@@ -116,28 +116,40 @@ The GitHub App needs **Contents**, **Issues**, and **Pull requests** set to read
 - The Agent can open pull requests but can't merge them. Protect `main` so every change needs review and passing CI.
 - Each run has a turn budget, and the engine step is capped at 35 minutes.
 
-## Triage with Jev
+## Triage
 
-`triage.py` and the **The Agent – triage** workflow ask [Jev](https://vercel.com/docs/ai-gateway/modalities/evaluation) (TypeSafe AI's evaluation model, through Vercel AI Gateway) three typed questions about each issue:
+`triage.py` and the **The Agent – triage** workflow ask a *judge* model three questions about each issue. There are two judges, and they get the same questions, the same project description, and the same routing rules, so their calls can be compared directly.
 
-| Question | Type | Answer |
+| Judge | What it is | Needs |
 |---|---|---|
-| `ready` | boolean | Probability the issue is specific enough for an unattended agent to reproduce with a test |
-| `complexity` | score | trivial, small, moderate, or large |
-| `tier` | choice | `fast`, `standard`, or `deep`, with a probability for each |
+| `haiku` (default) | Claude Haiku through Claude Code, with every tool disabled, run from an empty folder, and its reply held to a JSON schema. Gives a short reason for each call | `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (already used by the agent) |
+| `jev` | [Jev](https://vercel.com/docs/ai-gateway/modalities/evaluation), TypeSafe AI's evaluation model, through Vercel AI Gateway | `AI_GATEWAY_API_KEY`, and **paid** AI Gateway credits (the free tier can't call Jev) |
 
-Along with each issue, Jev gets a short description of the project, taken from the repository's own `AGENTS.md`: its introduction plus any layout, architecture, or build sections (`CLAUDE.md` or `README.md` if there's no `AGENTS.md`). Nothing about Freightline is written into the script, so it works on any repository that describes itself for agents. The description used is saved in the triage record.
+The questions:
 
-The routing call is `needs_info` when P(ready) is under 50%, otherwise the chosen tier. A tier pick under 60%, or a readiness probability near 50%, is flagged as uncertain.
+| Question | Answer |
+|---|---|
+| `ready` | Probability the issue is specific enough for an unattended agent to reproduce with a test |
+| `complexity` | trivial, small, moderate, or large |
+| `tier` | `fast`, `standard`, or `deep`, with a confidence |
 
-This step is **triage only**: it posts nothing to GitHub and starts no engine. It exists to measure whether Jev's calls are good before they're allowed to choose a tier for a real run.
+The routing call is `needs_info` when P(ready) is under 50%, otherwise the chosen tier. A tier pick under 60%, or a readiness probability near 50%, is flagged as uncertain. Jev's probabilities are measured; Haiku's confidences are its own estimates, so treat its flags as rougher.
 
-Run it from **Actions → The Agent – triage → Run workflow** with any issue numbers, as a list, a range, or both (`12`, `3,17,40`, `20-45`, `1-3,7`; up to 51 numbers per range). Numbers that belong to pull requests, or that don't exist, are skipped with a warning. Or from the terminal:
+Along with each issue, the judge gets a short description of the project, taken from the repository's own `AGENTS.md`: its introduction plus any layout, architecture, or build sections (`CLAUDE.md` or `README.md` if there's no `AGENTS.md`). Nothing about Freightline is written into the script, so it works on any repository that describes itself for agents. The description used is saved in the triage record.
+
+This step is **triage only**: it posts nothing to GitHub and starts no engine. It exists to measure whether the calls are good before they're allowed to choose a tier for a real run.
+
+Run it from **Actions → The Agent – triage → Run workflow** with any issue numbers, as a list, a range, or both (`12`, `3,17,40`, `20-45`, `1-3,7`; up to 51 numbers per range), and a judge. Numbers that belong to pull requests, or that don't exist, are skipped with a warning. Or from the terminal:
 
 ```bash
-gh workflow run the-agent-triage.yml --repo rmohamm/freightline -f issues=1-8
+gh workflow run the-agent-triage.yml --repo rmohamm/freightline -f issues=1-8 -f judge=haiku
 ```
 
-The results appear as annotations and a table on the run page, and as a `triage.json` artifact that includes every probability and the cost of each call.
+The results appear as annotations and a table on the run page (with Haiku's reasons under it), and as a `triage.json` artifact with every answer, token count, and cost.
 
-It needs one more repository secret, `AI_GATEWAY_API_KEY`, from the Vercel dashboard (**AI Gateway → API Keys**). The workflow's own token only reads issues; the gateway key is the only credential the script sees.
+| | Haiku | Jev |
+|---|---|---|
+| Time per issue | about 20–30 seconds | not measured yet (built to be fast) |
+| Cost per issue | about $0.02–0.04 at list price (counts against your Claude subscription with the OAuth token) | roughly $0.00005 (estimated from its per-token price) |
+
+If the judge's credential or account is refused, triage stops after the first call instead of repeating the error for every issue.

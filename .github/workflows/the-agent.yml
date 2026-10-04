@@ -1,6 +1,6 @@
 name: The Agent
 
-# Runner v0.2: fix one GitHub issue and open a pull request.
+# Runner v0.3: fix one GitHub issue and open a pull request.
 # Start it from the Actions tab (The Agent -> Run workflow), or add the `agent-ready` label to an issue.
 # See .agent/README.md for how it works and what it needs.
 
@@ -14,7 +14,7 @@ on:
       engine:
         description: Coding engine
         type: choice
-        options: [claude]
+        options: [claude, gemini]
         default: claude
       tier:
         description: "fast: small model, lean process | standard | deep: largest model, plan first"
@@ -131,52 +131,99 @@ jobs:
 
       - name: Prepare the workspace
         run: |
-          # Run output and the per-run skill copy are never committed.
-          printf '.agent-out/\n.claude/\n' >> .git/info/exclude
-          mkdir -p .claude/skills
+          # Run output and the per-run engine configuration are never committed.
+          printf '.agent-out/\n.claude/\n.gemini/\n' >> .git/info/exclude
           IFS=',' read -ra SKILLS <<< "${{ steps.tier.outputs.skills }}"
+          case "$ENGINE" in
+            claude)
+              skills_dest=.claude/skills
+              ;;
+            gemini)
+              # Gemini runs with workspace trust (--skip-trust), so refuse a repository that ships its own
+              # Gemini config: it could widen the tool allow-list. Our config goes in the runner's home folder.
+              if [ -e .gemini ]; then
+                echo "::error::This repository contains a .gemini/ folder; refusing to run Gemini with it."
+                exit 1
+              fi
+              skills_dest="$HOME/.gemini/skills"
+              python3 "$RUNNER_PY" gemini-settings "$TIER" > "$HOME/.gemini-settings.json"
+              mkdir -p "$HOME/.gemini" && mv "$HOME/.gemini-settings.json" "$HOME/.gemini/settings.json"
+              ;;
+          esac
+          mkdir -p "$skills_dest"
           for skill in "${SKILLS[@]}"; do
-            cp -r "$SKILLS_DIR/$skill" .claude/skills/
+            cp -r "$SKILLS_DIR/$skill" "$skills_dest/"
           done
           python3 "$RUNNER_PY" prompt "$OUT/issue.json" "$TIER" > "$OUT/prompt.md"
-          echo "Skills for this run: ${SKILLS[*]}"
+          echo "Skills for this run: ${SKILLS[*]} (in $skills_dest)"
 
-      # The engine gets the code and its model credential, and nothing else:
-      # no GitHub token is in its environment.
-      - name: Run the engine (Claude Code)
+      # The engine gets the code and its own model credential, and nothing else:
+      # no GitHub token and no other engine's credential is in its environment.
+      - name: Run the engine
         id: engine
-        if: env.ENGINE == 'claude'
         timeout-minutes: 35
         env:
           OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: ${{ steps.tier.outputs.model }}
+          MAX_TURNS: ${{ steps.tier.outputs.max_turns }}
         run: |
-          # Strip spaces and line breaks: a token copied from a wrapped terminal line is a common mistake.
-          API_KEY=$(printf '%s' "$API_KEY" | tr -d '[:space:]')
-          OAUTH_TOKEN=$(printf '%s' "$OAUTH_TOKEN" | tr -d '[:space:]')
-          if [ -n "$API_KEY" ]; then
-            export ANTHROPIC_API_KEY="$API_KEY"
-          elif [ -n "$OAUTH_TOKEN" ]; then
-            export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH_TOKEN"
-          else
-            echo "::error::Add a CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY repository secret."
-            exit 1
-          fi
-          unset API_KEY OAUTH_TOKEN
+          # Strip spaces and line breaks: a credential copied from a wrapped terminal line is a common mistake.
+          clean() { printf '%s' "$1" | tr -d '[:space:]'; }
+          API_KEY=$(clean "$API_KEY"); OAUTH_TOKEN=$(clean "$OAUTH_TOKEN"); GEMINI_KEY=$(clean "$GEMINI_KEY")
 
-          npm install -g @anthropic-ai/claude-code
-          claude --version
+          case "$ENGINE" in
+            claude)
+              if [ -n "$API_KEY" ]; then
+                export ANTHROPIC_API_KEY="$API_KEY"
+              elif [ -n "$OAUTH_TOKEN" ]; then
+                export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH_TOKEN"
+              else
+                echo "::error::Add a CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY repository secret."
+                exit 1
+              fi
+              unset API_KEY OAUTH_TOKEN GEMINI_KEY
+              npm install -g @anthropic-ai/claude-code
+              claude --version
+              engine_cmd=(claude -p "$(cat "$OUT/prompt.md")"
+                --model "$MODEL"
+                --max-turns "$MAX_TURNS"
+                --permission-mode dontAsk
+                --permission-prompts none
+                --allowedTools "Read,Edit,Write,Glob,Grep,Skill,TodoWrite,Bash(mvn *),Bash(./mvnw *)"
+                --output-format json)
+              ;;
+            gemini)
+              if [ -z "$GEMINI_KEY" ]; then
+                echo "::error::Add a GEMINI_API_KEY repository secret."
+                exit 1
+              fi
+              export GEMINI_API_KEY="$GEMINI_KEY"
+              unset API_KEY OAUTH_TOKEN GEMINI_KEY
+              npm install -g @google/gemini-cli
+              gemini --version
+              # YOLO approves tool calls automatically; the tool allow-list in ~/.gemini/settings.json
+              # decides which tools exist at all (file tools, and the shell only for mvn).
+              engine_cmd=(gemini -p "$(cat "$OUT/prompt.md")"
+                --model "$MODEL"
+                --approval-mode yolo
+                --skip-trust
+                --output-format json)
+              ;;
+            *)
+              echo "::error::Unknown engine: $ENGINE"
+              exit 1
+              ;;
+          esac
 
-          # Every engine's exit code and stderr are saved, so even an unfamiliar failure explains itself.
+          # Every engine's exit code, stderr, and wall-clock time are saved, so even an unfamiliar
+          # failure explains itself and every engine can be timed the same way.
           set +e
-          claude -p "$(cat "$OUT/prompt.md")" \
-            --model "${{ steps.tier.outputs.model }}" \
-            --max-turns "${{ steps.tier.outputs.max_turns }}" \
-            --permission-mode dontAsk \
-            --permission-prompts none \
-            --allowedTools "Read,Edit,Write,Glob,Grep,Skill,TodoWrite,Bash(mvn *),Bash(./mvnw *)" \
-            --output-format json > "$OUT/engine-result.json" 2> >(tee "$OUT/engine-stderr.log" >&2)
+          start=$(date +%s%3N)
+          "${engine_cmd[@]}" > "$OUT/engine-result.json" 2> >(tee "$OUT/engine-stderr.log" >&2)
           code=$?
+          echo $(( $(date +%s%3N) - start )) > "$OUT/engine-duration-ms"
           echo "$code" > "$OUT/engine-exit-code"
           echo "Engine exit code: $code"
           exit 0
@@ -281,6 +328,7 @@ jobs:
             work/.agent-out/engine-result.json
             work/.agent-out/engine-stderr.log
             work/.agent-out/engine-exit-code
+            work/.agent-out/engine-duration-ms
             work/.agent-out/verify.log
             work/.agent-out/pr-body.md
           if-no-files-found: ignore

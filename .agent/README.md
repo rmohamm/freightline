@@ -115,3 +115,27 @@ The GitHub App needs **Contents**, **Issues**, and **Pull requests** set to read
 - The `agent-ready` label can only be added by people with triage or write access to the repository.
 - The Agent can open pull requests but can't merge them. Protect `main` so every change needs review and passing CI.
 - Each run has a turn budget, and the engine step is capped at 35 minutes.
+
+## Triage with Jev
+
+`triage.py` and the **The Agent – triage** workflow ask [Jev](https://vercel.com/docs/ai-gateway/modalities/evaluation) (TypeSafe AI's evaluation model, through Vercel AI Gateway) three typed questions about each issue:
+
+| Question | Type | Answer |
+|---|---|---|
+| `ready` | boolean | Probability the issue is specific enough for an unattended agent to reproduce with a test |
+| `complexity` | score | trivial, small, moderate, or large |
+| `tier` | choice | `fast`, `standard`, or `deep`, with a probability for each |
+
+The routing call is `needs_info` when P(ready) is under 50%, otherwise the chosen tier. A tier pick under 60%, or a readiness probability near 50%, is flagged as uncertain.
+
+This step is **triage only**: it posts nothing to GitHub and starts no engine. It exists to measure whether Jev's calls are good before they're allowed to choose a tier for a real run.
+
+Run it from **Actions → The Agent – triage → Run workflow** with a list or range of issue numbers (`1-8`, `1,2,5`), or:
+
+```bash
+gh workflow run the-agent-triage.yml --repo rmohamm/freightline -f issues=1-8
+```
+
+The results appear as annotations and a table on the run page, and as a `triage.json` artifact that includes every probability and the cost of each call.
+
+It needs one more repository secret, `AI_GATEWAY_API_KEY`, from the Vercel dashboard (**AI Gateway → API Keys**). The workflow's own token only reads issues; the gateway key is the only credential the script sees.

@@ -31,6 +31,8 @@ jobs:
       ISSUES: ${{ inputs.issues }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
+      # Sparse checkout keeps the files at the repository root, so AGENTS.md is there
+      # for triage.py to describe the project from.
       - name: Check out the runner
         uses: actions/checkout@v4
         with:

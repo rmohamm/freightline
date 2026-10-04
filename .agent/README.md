@@ -126,6 +126,8 @@ The GitHub App needs **Contents**, **Issues**, and **Pull requests** set to read
 | `complexity` | score | trivial, small, moderate, or large |
 | `tier` | choice | `fast`, `standard`, or `deep`, with a probability for each |
 
+Along with each issue, Jev gets a short description of the project, taken from the repository's own `AGENTS.md`: its introduction plus any layout, architecture, or build sections (`CLAUDE.md` or `README.md` if there's no `AGENTS.md`). Nothing about Freightline is written into the script, so it works on any repository that describes itself for agents. The description used is saved in the triage record.
+
 The routing call is `needs_info` when P(ready) is under 50%, otherwise the chosen tier. A tier pick under 60%, or a readiness probability near 50%, is flagged as uncertain.
 
 This step is **triage only**: it posts nothing to GitHub and starts no engine. It exists to measure whether Jev's calls are good before they're allowed to choose a tier for a real run.

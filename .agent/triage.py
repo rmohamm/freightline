@@ -13,6 +13,9 @@ Nothing is posted to GitHub and nothing is run; this step only measures whether 
 Usage:
   triage.py OUT_DIR ISSUE_JSON [ISSUE_JSON ...]
 
+Run it from the repository root. The project description Jev sees comes from the repository
+itself (see project_context), so nothing here is specific to one codebase.
+
 Needs AI_GATEWAY_API_KEY in the environment. Standard-library Python only.
 Writes OUT_DIR/triage.json, prints a GitHub annotation per issue, and appends a table to
 $GITHUB_STEP_SUMMARY when it is set.
@@ -20,6 +23,7 @@ $GITHUB_STEP_SUMMARY when it is set.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -34,13 +38,10 @@ LOW_CONFIDENCE = 0.6           # a tier pick below this probability is flagged f
 RETRIES = 3                    # for rate limits (429) and gateway errors (5xx)
 TIMEOUT_SECONDS = 60
 
-PROJECT = (
-    "Freightline: a Java 21 / Spring Boot service for shipment tracking and freight rating, "
-    "with a REST API, JPA entities on an in-memory H2 database, and a JUnit 5 / MockMvc test suite. "
-    "Packages: carrier (carrier entity, seeded data), shipment (entities, service, controller, DTOs, "
-    "delivery estimates), rating (rate calculator and quote API), config (clock, demo data), "
-    "web (error handling)."
-)
+MAX_CONTEXT_CHARS = 4000       # project description sent with every issue
+CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")   # first one found describes the project
+CONTEXT_HEADINGS = ("layout", "structure", "architecture", "overview", "modules", "packages",
+                    "stack", "build")
 
 # The questions are generic: they describe the runner's tiers, not any particular issue.
 QUESTIONS = {
@@ -103,11 +104,35 @@ def load_issue(path):
     }
 
 
-def build_request(issue):
+def project_context(root="."):
+    """Describe the project from its own agent instructions.
+
+    Uses the first of CONTEXT_FILES that exists: its introduction (the text before the first
+    "## " heading) plus any section about the code's layout, architecture, or build. If the file has no
+    such section, the start of the file is used. Returns (text, source_file), or ("", None).
+    """
+    for name in CONTEXT_FILES:
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        sections = re.split(r"(?m)^(?=## )", text)
+        intro, rest = sections[0], sections[1:]
+        picked = [sec for sec in rest
+                  if any(h in sec.splitlines()[0].lower() for h in CONTEXT_HEADINGS)]
+        body = "\n\n".join([intro.strip()] + [sec.strip() for sec in picked]) if picked else text
+        body = body.strip()
+        if body:
+            return body[:MAX_CONTEXT_CHARS], name
+    return "", None
+
+
+def build_request(issue, context):
     return {
         "model": MODEL,
         "state": {
-            "project": PROJECT,
+            "project": context or "(no project description found)",
             "issue": {
                 "title": issue["title"],
                 "labels": issue["labels"],
@@ -238,6 +263,12 @@ def cell(text):
 
 def triage(out_dir, issue_paths, api_key):
     os.makedirs(out_dir, exist_ok=True)
+    context, context_source = project_context()
+    if context_source:
+        print(f"Project description: {context_source} ({len(context)} characters)")
+    else:
+        print("::warning title=Triage::No AGENTS.md, CLAUDE.md, or README.md found; "
+              "Jev will judge the issues without a project description")
     results = []
     issues = sorted((load_issue(p) for p in issue_paths), key=lambda i: i["number"])
     for issue in issues:
@@ -250,7 +281,7 @@ def triage(out_dir, issue_paths, api_key):
             results.append(entry)
             continue
         try:
-            response, seconds, attempts = call_jev(build_request(issue), api_key)
+            response, seconds, attempts = call_jev(build_request(issue, context), api_key)
             entry.update(interpret(response))
             entry.update(seconds=round(seconds, 2), attempts=attempts, raw=response)
         except RuntimeError as e:
@@ -275,6 +306,8 @@ def triage(out_dir, issue_paths, api_key):
         "model": MODEL,
         "endpoint": ENDPOINT,
         "thresholds": {"ready": READY_THRESHOLD, "low_confidence": LOW_CONFIDENCE},
+        "project_context_source": context_source,
+        "project_context": context,
         "questions": QUESTIONS,
         "issues": results,
         "total_cost": round(sum(costs), 8) if costs else None,

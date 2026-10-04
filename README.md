@@ -4,6 +4,14 @@ A small shipment tracking and freight rating service, built with Java 21 and Spr
 
 Freightline lets you create shipments with a carrier and service level, record status events as a shipment moves (picked up, in transit, delivered), estimate delivery dates, and quote freight rates.
 
+## Geek Agent demo
+
+This repository is the demo for [Geek Agent](https://github.com/rmohamm/geek-agent), an unattended coding agent that fixes a GitHub issue and opens a pull request for human review. Its issues are seeded bugs and feature requests; the agent's pull requests show what it does with them.
+
+- **Fix an issue:** Actions → **Geek Agent** → Run workflow, or add the `agent-ready` label to an issue.
+- **Triage issues:** Actions → **Geek Agent triage** → Run workflow.
+- **Comparison runs** use the `eval/baseline` branch, which holds the original code with every seeded bug. Their pull requests target `eval/baseline` and are never merged.
+
 ## Run it
 
 ```bash

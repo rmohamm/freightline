@@ -6,6 +6,10 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +18,7 @@ import com.freightline.carrier.CarrierRepository;
 import com.freightline.shipment.ShipmentDtos.AddEventRequest;
 import com.freightline.shipment.ShipmentDtos.CreateShipmentRequest;
 import com.freightline.shipment.ShipmentDtos.ShipmentEventResponse;
+import com.freightline.shipment.ShipmentDtos.ShipmentPageResponse;
 import com.freightline.shipment.ShipmentDtos.ShipmentResponse;
 import com.freightline.shipment.ShipmentDtos.ShipmentSummary;
 
@@ -65,6 +70,15 @@ public class ShipmentService {
         return shipments.findAll().stream()
                 .map(ShipmentResponse::from)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public ShipmentPageResponse list(int page, int size) {
+        int effectiveSize = Math.min(size, 100);
+        Pageable pageable = PageRequest.of(page, effectiveSize, Sort.by(Sort.Direction.DESC, "createdAt"));
+        Page<ShipmentResponse> shipmentPage = shipments.findAll(pageable)
+                .map(ShipmentResponse::from);
+        return ShipmentPageResponse.from(shipmentPage);
     }
 
     @Transactional

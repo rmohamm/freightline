@@ -49,7 +49,7 @@ public class ShipmentService {
                 carrier,
                 request.serviceLevel(),
                 now);
-        shipment.setEstimatedDelivery(deliveryEstimator.estimate(now, request.serviceLevel()));
+        shipment.setEstimatedDelivery(deliveryEstimator.estimate(now, request.serviceLevel(), originZone));
         shipment.addEvent(new ShipmentEvent(ShipmentStatus.CREATED, request.origin(), "Shipment created", now));
 
         return ShipmentResponse.from(shipments.save(shipment));

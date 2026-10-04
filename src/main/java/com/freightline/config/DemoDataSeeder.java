@@ -3,6 +3,7 @@ package com.freightline.config;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Random;
 
@@ -74,7 +75,7 @@ public class DemoDataSeeder implements CommandLineRunner {
             Shipment shipment = new Shipment(
                     String.format("FLDEMO%06d", i), lane[0], lane[2], lane[1],
                     weightKg, carrier, level, createdAt);
-            shipment.setEstimatedDelivery(estimator.estimate(createdAt, level));
+            shipment.setEstimatedDelivery(estimator.estimate(createdAt, level, ZoneId.of(lane[1])));
             shipment.addEvent(new ShipmentEvent(ShipmentStatus.CREATED, lane[0], "Shipment created", createdAt));
 
             int steps = random.nextInt(PROGRESSION.size() + 1);

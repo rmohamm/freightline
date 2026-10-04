@@ -149,7 +149,7 @@ The results appear as annotations and a table on the run page (with Haiku's reas
 
 | | Haiku | Jev |
 |---|---|---|
-| Time per issue | about 20–30 seconds | under a second |
-| Cost per issue | about $0.02–0.04 at list price (counts against your Claude subscription with the OAuth token) | well under $0.0001 |
+| Time per issue | about 20–30 seconds | not measured yet (built to be fast) |
+| Cost per issue | about $0.02–0.04 at list price (counts against your Claude subscription with the OAuth token) | roughly $0.00005 (estimated from its per-token price) |
 
 If the judge's credential or account is refused, triage stops after the first call instead of repeating the error for every issue.

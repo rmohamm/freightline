@@ -2,7 +2,7 @@ package com.freightline.shipment;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 
 import org.springframework.stereotype.Component;
 
@@ -13,9 +13,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class DeliveryEstimator {
 
-    public LocalDate estimate(Instant createdAt, ServiceLevel serviceLevel) {
-        // All timestamps are stored in UTC.
-        LocalDate shipDate = LocalDate.ofInstant(createdAt, ZoneOffset.UTC);
+    public LocalDate estimate(Instant createdAt, ZoneId originZone, ServiceLevel serviceLevel) {
+        LocalDate shipDate = LocalDate.ofInstant(createdAt, originZone);
         return shipDate.plusDays(serviceLevel.transitDays());
     }
 }

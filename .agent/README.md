@@ -1,4 +1,4 @@
-# The Agent (runner v0.3)
+# The Agent (runner v0.3.1)
 
 The Agent fixes a GitHub issue in this repository and opens a pull request, without a human in the loop until review.
 
@@ -43,7 +43,7 @@ The process for each tier is the same for every engine, so a comparison only var
 | Tool allow-list | `--allowedTools`: read, edit, write, search, `mvn` | `tools.core` in `~/.gemini/settings.json`: file tools, todos, skills, and the shell only for `mvn` |
 | Approvals | `dontAsk`: anything not allowed is denied | YOLO: everything that exists is approved; the allow-list decides what exists |
 | Turns reported | conversation turns | API requests |
-| Cost reported | estimated by Claude Code | not reported; token totals are recorded instead |
+| Cost reported | estimated by Claude Code | estimated by the runner from token counts and the published prices in `GEMINI_PRICES` (`runner.py`); update that table when Google changes prices |
 
 ## What a run does
 

@@ -57,7 +57,23 @@ class ShipmentApiTest {
     }
 
     @Test
-    void rejectsUnknownCarrier() throws Exception {
+    void rejectsNegativeWeight() throws Exception {
+        mvc.perform(post("/api/shipments")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_SHIPMENT.replace("12.5", "-5")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsZeroWeight() throws Exception {
+        mvc.perform(post("/api/shipments")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_SHIPMENT.replace("12.5", "0")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsUnknownCarrier()throws Exception {
         mvc.perform(post("/api/shipments")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(VALID_SHIPMENT.replace("RDLN", "NOPE")))

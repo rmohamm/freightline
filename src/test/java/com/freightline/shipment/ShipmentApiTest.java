@@ -127,6 +127,31 @@ class ShipmentApiTest {
                 .andExpect(jsonPath("$[*].carrierName", hasItem("Redline Logistics")));
     }
 
+    @Test
+    void returnsNotFoundWhenShipmentDoesNotExist() throws Exception {
+        mvc.perform(get("/api/shipments/{id}", 999999L))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Shipment 999999 not found"));
+    }
+
+    @Test
+    void returnsNotFoundWhenGettingHistoryForNonExistentShipment() throws Exception {
+        mvc.perform(get("/api/shipments/{id}/history", 999999L))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Shipment 999999 not found"));
+    }
+
+    @Test
+    void returnsNotFoundWhenAddingEventForNonExistentShipment() throws Exception {
+        mvc.perform(post("/api/shipments/{id}/events", 999999L)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status": "PICKED_UP", "location": "Dallas, TX"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Shipment 999999 not found"));
+    }
+
     private long createShipment() throws Exception {
         MvcResult result = mvc.perform(post("/api/shipments")
                         .contentType(MediaType.APPLICATION_JSON)

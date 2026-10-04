@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
@@ -57,7 +58,7 @@ public class ShipmentService {
 
     @Transactional(readOnly = true)
     public ShipmentResponse get(Long id) {
-        return ShipmentResponse.from(shipments.findById(id).orElseThrow());
+        return ShipmentResponse.from(findShipment(id));
     }
 
     @Transactional(readOnly = true)
@@ -69,7 +70,7 @@ public class ShipmentService {
 
     @Transactional
     public ShipmentEventResponse addEvent(Long shipmentId, AddEventRequest request) {
-        Shipment shipment = shipments.findById(shipmentId).orElseThrow();
+        Shipment shipment = findShipment(shipmentId);
         Instant occurredAt = request.occurredAt() != null ? request.occurredAt() : clock.instant();
 
         ShipmentEvent event = new ShipmentEvent(request.status(), request.location(), request.note(), occurredAt);
@@ -81,10 +82,15 @@ public class ShipmentService {
 
     @Transactional(readOnly = true)
     public List<ShipmentEventResponse> history(Long shipmentId) {
-        Shipment shipment = shipments.findById(shipmentId).orElseThrow();
+        Shipment shipment = findShipment(shipmentId);
         return shipment.getEvents().stream()
                 .map(ShipmentEventResponse::from)
                 .toList();
+    }
+
+    private Shipment findShipment(Long id) {
+        return shipments.findById(id)
+                .orElseThrow(() -> new NoSuchElementException("Shipment " + id + " not found"));
     }
 
     @Transactional(readOnly = true)

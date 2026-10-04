@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.request
 
-TRIAGE_VERSION = "v0.1"
+TRIAGE_VERSION = "v0.1.1"
 ENDPOINT = "https://ai-gateway.vercel.sh/v1/evaluate"
 MODEL = "typesafe-ai/jev"
 MAX_BODY_CHARS = 8000          # issue bodies longer than this are cut, and the record says so
@@ -143,6 +143,17 @@ def build_request(issue, context):
     }
 
 
+class AccountError(RuntimeError):
+    """The gateway refused the account or key itself (401, 402, 403), so every call would fail."""
+
+
+ACCOUNT_HINTS = {
+    401: "The AI_GATEWAY_API_KEY secret was not accepted. Check that it holds a current AI Gateway API key.",
+    402: "The AI Gateway account needs credits.",
+    403: "The AI Gateway account can't use this model; the gateway's message says why.",
+}
+
+
 def call_jev(payload, api_key):
     """POST to the evaluation API. Returns (response_json, seconds, attempts)."""
     data = json.dumps(payload).encode("utf-8")
@@ -168,6 +179,8 @@ def call_jev(payload, api_key):
             if retryable and attempt < RETRIES:
                 time.sleep(2 ** attempt)
                 continue
+            if e.code in ACCOUNT_HINTS:
+                raise AccountError(f"HTTP {e.code}: {error_message(text)}") from None
             raise RuntimeError(f"HTTP {e.code}: {error_message(text)}") from None
         except (urllib.error.URLError, TimeoutError) as e:
             if attempt < RETRIES:
@@ -270,11 +283,16 @@ def triage(out_dir, issue_paths, api_key):
         print("::warning title=Triage::No AGENTS.md, CLAUDE.md, or README.md found; "
               "Jev will judge the issues without a project description")
     results = []
+    stopped = None      # set when the account is refused; later issues aren't sent
     issues = sorted((load_issue(p) for p in issue_paths), key=lambda i: i["number"])
     for issue in issues:
         n = issue["number"]
         entry = {"issue": n, "title": issue["title"], "state": issue["state"],
                  "labels": issue["labels"], "body_truncated": issue["truncated"]}
+        if stopped:
+            entry.update(route="not_run")
+            results.append(entry)
+            continue
         if issue["is_pull_request"]:
             entry.update(route="skipped", error="this number is a pull request, not an issue")
             print(f"::warning title=Issue #{n}::Skipped: it is a pull request, not an issue")
@@ -284,6 +302,12 @@ def triage(out_dir, issue_paths, api_key):
             response, seconds, attempts = call_jev(build_request(issue, context), api_key)
             entry.update(interpret(response))
             entry.update(seconds=round(seconds, 2), attempts=attempts, raw=response)
+        except AccountError as e:
+            stopped = str(e)
+            entry.update(route="not_run", error=stopped)
+            print(f"::error title=Triage stopped::{one_line(stopped)}")
+            results.append(entry)
+            continue
         except RuntimeError as e:
             entry.update(route="error", error=str(e))
             print(f"::error title=Issue #{n}::Jev call failed: {one_line(str(e))}")
@@ -312,6 +336,8 @@ def triage(out_dir, issue_paths, api_key):
         "issues": results,
         "total_cost": round(sum(costs), 8) if costs else None,
         "errors": sum(1 for r in results if r["route"] == "error"),
+        "stopped": stopped,
+        "not_run": sum(1 for r in results if r["route"] == "not_run"),
     }
     with open(os.path.join(out_dir, "triage.json"), "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
@@ -334,7 +360,12 @@ def render_summary(record):
         "| Issue | Route | Ready | Complexity | Tier (confidence) | Flags | Cost |",
         "|---|---|---|---|---|---|---|",
     ]
+    if record.get("stopped"):
+        lines[1:1] = ["", f"> **Stopped before triaging anything else:** {cell(record['stopped'])}"]
     for r in record["issues"]:
+        if r["route"] == "not_run":
+            lines.append(f"| #{r['issue']} {cell(r['title'])} | not run | | | | | |")
+            continue
         if r["route"] in ("error", "skipped") and "error" in r:
             lines.append(f"| #{r['issue']} {cell(r['title'])} | **{r['route']}** | | | | {cell(r['error'])} | |")
             continue
@@ -365,6 +396,9 @@ def main(argv):
     if not api_key:
         fail("AI_GATEWAY_API_KEY is not set. Add it as a repository secret (Vercel → AI Gateway → API Keys).")
     record = triage(argv[1], argv[2:], api_key)
+    if record["stopped"]:
+        code = int(record["stopped"].split()[1].rstrip(":"))
+        fail(f"{ACCOUNT_HINTS[code]} {record['not_run']} issues were not sent.")
     if record["errors"]:
         fail(f"{record['errors']} of {len(record['issues'])} issues could not be triaged; see the annotations.")
 

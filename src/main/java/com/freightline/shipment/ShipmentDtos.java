@@ -2,6 +2,9 @@ package com.freightline.shipment;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
+
+import org.springframework.data.domain.Page;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -74,5 +77,54 @@ public final class ShipmentDtos {
             String lastLocation,
             Instant lastEventAt,
             int eventCount) {
+    }
+
+    public record ShipmentPageResponse(
+            List<ShipmentResponse> content,
+            int page,
+            int size,
+            long totalElements,
+            int totalPages) {
+
+        public List<ShipmentResponse> getShipments() {
+            return content;
+        }
+
+        public int getNumber() {
+            return page;
+        }
+
+        public int getPageNumber() {
+            return page;
+        }
+
+        public int getPageSize() {
+            return size;
+        }
+
+        public boolean isFirst() {
+            return page == 0;
+        }
+
+        public boolean isLast() {
+            return totalPages == 0 || page >= totalPages - 1;
+        }
+
+        public int getNumberOfElements() {
+            return content.size();
+        }
+
+        public boolean isEmpty() {
+            return content.isEmpty();
+        }
+
+        public static ShipmentPageResponse from(Page<ShipmentResponse> p) {
+            return new ShipmentPageResponse(
+                    p.getContent(),
+                    p.getNumber(),
+                    p.getSize(),
+                    p.getTotalElements(),
+                    p.getTotalPages());
+        }
     }
 }

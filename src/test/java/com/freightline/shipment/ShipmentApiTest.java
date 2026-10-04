@@ -110,7 +110,67 @@ class ShipmentApiTest {
 
         mvc.perform(get("/api/shipments"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[*].id", hasItem((int) id)));
+                .andExpect(jsonPath("$.content[*].id", hasItem((int) id)));
+    }
+
+    @Test
+    void listsShipmentsWithPaginationDefaults() throws Exception {
+        createShipment();
+
+        mvc.perform(get("/api/shipments"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isArray())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.number").value(0))
+                .andExpect(jsonPath("$.size").value(20))
+                .andExpect(jsonPath("$.pageSize").value(20))
+                .andExpect(jsonPath("$.totalElements").isNumber())
+                .andExpect(jsonPath("$.totalPages").isNumber());
+    }
+
+    @Test
+    void listsShipmentsWithCustomPageAndSize() throws Exception {
+        createShipment();
+        createShipment();
+
+        mvc.perform(get("/api/shipments").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.content", hasSize(2)));
+    }
+
+    @Test
+    void sortsShipmentsByCreatedAtNewestFirst() throws Exception {
+        long id1 = createShipment();
+        Thread.sleep(20);
+        long id2 = createShipment();
+
+        MvcResult result = mvc.perform(get("/api/shipments").param("size", "100"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        Number firstId = JsonPath.read(result.getResponse().getContentAsString(), "$.content[0].id");
+        org.junit.jupiter.api.Assertions.assertEquals(id2, firstId.longValue());
+    }
+
+    @Test
+    void capsPageSizeAt100() throws Exception {
+        mvc.perform(get("/api/shipments").param("size", "150"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.size").value(100));
+    }
+
+    @Test
+    void rejectsNegativePage() throws Exception {
+        mvc.perform(get("/api/shipments").param("page", "-1"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsNonPositiveSize() throws Exception {
+        mvc.perform(get("/api/shipments").param("size", "0"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

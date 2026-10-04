@@ -5,6 +5,7 @@ import java.time.LocalDate;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 
 /** Request and response types for the shipment API. */
 public final class ShipmentDtos {
@@ -16,7 +17,7 @@ public final class ShipmentDtos {
             @NotBlank String origin,
             @NotBlank String destination,
             @NotBlank String originTimeZone,
-            double weightKg,
+            @Positive double weightKg,
             @NotBlank String carrierCode,
             @NotNull ServiceLevel serviceLevel) {
     }

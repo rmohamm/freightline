@@ -1,4 +1,4 @@
-# The Agent (runner v0.3.1)
+# The Agent (runner v0.3.2)
 
 The Agent fixes a GitHub issue in this repository and opens a pull request, without a human in the loop until review.
 

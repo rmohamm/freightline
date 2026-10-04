@@ -1,6 +1,8 @@
 package com.freightline.rating;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -31,7 +33,20 @@ class RateApiTest {
     }
 
     @Test
-    void rejectsUnknownCarrier() throws Exception {
+    void quoteAmountsHaveTwoDecimalPlaces() throws Exception {
+        mvc.perform(post("/api/rates/quote")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"carrierCode": "FSHP", "serviceLevel": "STANDARD", "weightKg": 3}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("\"subtotal\":6.30,")))
+                .andExpect(content().string(containsString("\"fuelSurcharge\":0.50,")))
+                .andExpect(content().string(containsString("\"total\":6.80}")));
+    }
+
+    @Test
+    void rejectsUnknownCarrier()throws Exception {
         mvc.perform(post("/api/rates/quote")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""

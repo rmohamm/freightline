@@ -1,0 +1,29 @@
+# Asks a judge model whether issues are ready for Geek Agent (https://github.com/rmohamm/geek-agent)
+# and which tier they need. It posts nothing to GitHub.
+
+name: Geek Agent triage
+
+on:
+  workflow_dispatch:
+    inputs:
+      issues:
+        description: "Issue numbers: e.g. 12 or 3,17,40 or 20-45 or 1-3,7 (up to 51 per range)"
+        required: true
+        type: string
+      judge:
+        description: "haiku: Claude Haiku with no tools | jev: Jev through Vercel AI Gateway (needs paid credits)"
+        type: choice
+        options: [haiku, jev]
+        default: haiku
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  triage:
+    uses: rmohamm/geek-agent/.github/workflows/triage.yml@v0.4.0
+    with:
+      issues: ${{ inputs.issues }}
+      judge: ${{ inputs.judge }}
+    secrets: inherit

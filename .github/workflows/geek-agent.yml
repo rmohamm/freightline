@@ -1,0 +1,43 @@
+# Runs Geek Agent (https://github.com/rmohamm/geek-agent) on one issue: from the Actions tab,
+# or when the `agent-ready` label is added. The runner lives in geek-agent, pinned below.
+
+name: Geek Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to fix
+        required: true
+        type: number
+      engine:
+        description: Coding engine
+        type: choice
+        options: [claude, gemini]
+        default: claude
+      tier:
+        description: "fast: small model, lean process | standard | deep: largest model, plan first"
+        type: choice
+        options: [fast, standard, deep]
+        default: standard
+      base:
+        description: "Branch to work on (empty: the default branch)"
+        type: string
+        default: ""
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    # Manual runs always go; label events only for the agent-ready label.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'agent-ready'
+    uses: rmohamm/geek-agent/.github/workflows/agent.yml@v0.4.0
+    with:
+      issue: ${{ inputs.issue || github.event.issue.number }}
+      engine: ${{ inputs.engine || 'claude' }}
+      tier: ${{ inputs.tier || 'standard' }}
+      base: ${{ inputs.base || '' }}
+    secrets: inherit

@@ -2,9 +2,9 @@
 """Helper for The Agent workflow (.github/workflows/the-agent.yml).
 
 Subcommands:
-  check-issue ISSUE_JSON          fail unless the issue is an open issue (not a PR)
-  tier TIER                       print tier settings as key=value lines for $GITHUB_OUTPUT
-  prompt ISSUE_JSON TIER          print the engine prompt built from .agent/prompt.md
+  check-issue ISSUE_JSON [yes|no] fail unless the issue is an open issue (not a PR); "yes" also allows closed
+  tier TIER ENGINE                print tier settings for that engine as key=value lines for $GITHUB_OUTPUT
+  prompt ISSUE_JSON TIER          print the engine prompt built from prompt.md
   engine-summary                  print the engine's result, error and blocked tool calls, and
                                   raise them as annotations (paths come from env vars)
   report                          decide the outcome and write the PR body, issue comment,
@@ -20,28 +20,31 @@ import sys
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent
-RUNNER_VERSION = "v0.1"
+RUNNER_VERSION = "v0.2"
 
-# Tier -> engine settings and Superpowers process depth.
+# Tier -> process depth (Superpowers skills, turn budget, plan first). The same for every engine,
+# so a comparison between engines only varies the engine.
 TIERS = {
     "fast": {
-        "model": "haiku",
         "max_turns": 40,
         "skills": ["test-driven-development", "verification-before-completion"],
         "plan": False,
     },
     "standard": {
-        "model": "sonnet",
         "max_turns": 80,
         "skills": ["test-driven-development", "systematic-debugging", "verification-before-completion"],
         "plan": False,
     },
     "deep": {
-        "model": "opus",
         "max_turns": 120,
         "skills": ["test-driven-development", "systematic-debugging", "verification-before-completion"],
         "plan": True,
     },
+}
+
+# Engine -> model for each tier.
+ENGINE_MODELS = {
+    "claude": {"fast": "haiku", "standard": "sonnet", "deep": "opus"},
 }
 
 PROTECTED_PREFIXES = (".github/", ".agent/", ".claude/")
@@ -68,17 +71,27 @@ def read_text(path, default=""):
         return default
 
 
+def short(text, limit=160):
+    """First line of a command or message, trimmed for tables and annotations."""
+    lines = str(text).strip().splitlines()
+    first = lines[0] if lines else ""
+    if len(first) > limit:
+        return first[: limit - 1] + "…"
+    return first + (" …" if len(lines) > 1 else "")
+
+
 # --- check-issue -------------------------------------------------------------
 
-def cmd_check_issue(issue_path):
+def cmd_check_issue(issue_path, allow_closed="no"):
     issue = load_json(issue_path)
     if not issue:
         fail(f"Could not read the issue from {issue_path}.")
     if "pull_request" in issue:
         fail(f"#{issue['number']} is a pull request, not an issue.")
-    if issue.get("state") != "open":
-        fail(f"Issue #{issue['number']} is {issue.get('state')}; The Agent only works on open issues.")
-    print(f"Issue #{issue['number']}: {issue['title']}")
+    if issue.get("state") != "open" and allow_closed != "yes":
+        fail(f"Issue #{issue['number']} is {issue.get('state')}; The Agent only works on open issues "
+             "(closed issues are allowed only on comparison runs against a baseline branch).")
+    print(f"Issue #{issue['number']} ({issue.get('state')}): {issue['title']}")
 
 
 # --- tier ------------------------------------------------------------------
@@ -89,9 +102,15 @@ def get_tier(name):
     return TIERS[name]
 
 
-def cmd_tier(name):
+def get_model(engine, tier_name):
+    if engine not in ENGINE_MODELS:
+        fail(f"Unknown engine '{engine}'. Use one of: {', '.join(ENGINE_MODELS)}.")
+    return ENGINE_MODELS[engine][tier_name]
+
+
+def cmd_tier(name, engine):
     tier = get_tier(name)
-    print(f"model={tier['model']}")
+    print(f"model={get_model(engine, name)}")
     print(f"max_turns={tier['max_turns']}")
     print(f"skills={','.join(tier['skills'])}")
 
@@ -132,6 +151,99 @@ def cmd_prompt(issue_path, tier_name):
     sys.stdout.write(build_prompt(issue, tier_name))
 
 
+# --- engine adapters -------------------------------------------------------
+#
+# Each engine reports its result in its own format. An adapter turns that into one common shape:
+#   {ok, error, turns, duration_ms, cost, denied, exit_code}
+# Everything after this point (outcome, PR body, run record) only uses the common shape.
+
+def read_exit_code(out):
+    text = read_text(out / "engine-exit-code").strip()
+    return int(text) if text.lstrip("-").isdigit() else None
+
+
+def stderr_tail(out, lines=5):
+    tail = read_text(out / "engine-stderr.log").strip().splitlines()[-lines:]
+    return " | ".join(l.strip() for l in tail if l.strip())
+
+
+def generic_result(out):
+    """Fallback for any engine: judge by exit code and stderr alone."""
+    exit_code = read_exit_code(out)
+    error = None
+    if exit_code is None:
+        error = "The engine produced no result (it may have crashed or been stopped before finishing)."
+    elif exit_code != 0:
+        tail = stderr_tail(out)
+        error = f"The engine exited with code {exit_code}" + (f": {tail}" if tail else ".")
+    return {"ok": error is None, "error": error, "turns": None, "duration_ms": None,
+            "cost": None, "denied": [], "exit_code": exit_code}
+
+
+def claude_result(out):
+    # Claude Code reports in-run failures (bad credentials, API errors) in its JSON result on stdout,
+    # not on stderr, so the error message has to be read from there.
+    raw = load_json(out / "engine-result.json")
+    if not raw:
+        return generic_result(out)
+    error = None
+    if raw.get("is_error"):
+        message = str(raw.get("result") or "").strip()
+        detail = raw.get("api_error") or raw.get("terminal_reason") or raw.get("subtype")
+        error = f"{message} ({detail})" if message and detail else (message or str(detail or "Unknown engine error."))
+    denied = []
+    for item in raw.get("permission_denials") or []:
+        tool = item.get("tool_name", "?")
+        tool_input = item.get("tool_input") or {}
+        detail = tool_input.get("command") or tool_input.get("file_path") or tool_input.get("path") or ""
+        denied.append(f"{tool}: {short(detail)}" if detail else tool)
+    cost = raw.get("total_cost_usd")
+    return {"ok": error is None, "error": error, "turns": raw.get("num_turns"),
+            "duration_ms": raw.get("duration_ms"),
+            "cost": cost if isinstance(cost, (int, float)) else None,
+            "denied": denied, "exit_code": read_exit_code(out)}
+
+
+ENGINE_ADAPTERS = {"claude": claude_result}
+
+
+def engine_result(engine, out):
+    return ENGINE_ADAPTERS.get(engine, generic_result)(out)
+
+
+# --- engine-summary --------------------------------------------------------
+
+def format_duration(ms):
+    if not ms:
+        return "n/a"
+    seconds = int(ms / 1000)
+    return f"{seconds // 60}m {seconds % 60:02d}s"
+
+
+def cmd_engine_summary():
+    """Print what the engine did, and raise annotations the run page and API can show."""
+    out = Path(os.environ["OUT"])
+    result = engine_result(os.environ.get("ENGINE", "claude"), out)
+
+    lines = ["### Engine result", ""]
+    if result["error"]:
+        print(f"::error title=Engine error::{result['error']}")
+        lines.append(f"**Error:** {result['error']}")
+    else:
+        lines.append(f"Finished in {format_duration(result['duration_ms'])} and {result['turns'] or '?'} turns.")
+    if result["denied"]:
+        print(f"::warning title=Blocked tool calls::{len(result['denied'])} blocked: "
+              + "; ".join(result["denied"])[:900])
+        lines += ["", f"**Blocked by the tool allow-list ({len(result['denied'])}):**", ""]
+        lines += [f"- `{d}`" for d in result["denied"]]
+    text = "\n".join(lines) + "\n"
+    print(text)
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a") as fh:
+            fh.write(text + "\n")
+
+
 # --- report ----------------------------------------------------------------
 
 def parse_numstat(text):
@@ -162,63 +274,6 @@ def failure_excerpt(text, limit=40):
     return "\n".join(keep[:limit])
 
 
-def format_duration(ms):
-    if not ms:
-        return "n/a"
-    seconds = int(ms / 1000)
-    return f"{seconds // 60}m {seconds % 60:02d}s"
-
-
-def engine_error_message(result):
-    """Claude Code reports in-run failures (bad credentials, API errors) in the result JSON, not on stderr."""
-    if not result:
-        return "The engine produced no result (it may have crashed or been stopped before finishing)."
-    if not result.get("is_error"):
-        return None
-    message = str(result.get("result") or "").strip()
-    detail = result.get("api_error") or result.get("terminal_reason") or result.get("subtype")
-    if message and detail:
-        return f"{message} ({detail})"
-    return message or str(detail or "Unknown engine error.")
-
-
-def denied_commands(result):
-    """Tool calls the permission allow-list blocked, as short readable strings."""
-    denied = []
-    for item in (result or {}).get("permission_denials") or []:
-        tool = item.get("tool_name", "?")
-        tool_input = item.get("tool_input") or {}
-        detail = tool_input.get("command") or tool_input.get("file_path") or tool_input.get("path") or ""
-        denied.append(f"{tool}: {detail}" if detail else tool)
-    return denied
-
-
-def cmd_engine_summary():
-    """Print what the engine did, and raise annotations the run page and API can show."""
-    out = Path(os.environ["OUT"])
-    result = load_json(out / "engine-result.json", {}) or {}
-    error = engine_error_message(result)
-    denied = denied_commands(result)
-
-    lines = ["### Engine result", ""]
-    if error:
-        print(f"::error title=Engine error::{error}")
-        lines.append(f"**Error:** {error}")
-    else:
-        lines.append(f"Finished in {format_duration(result.get('duration_ms'))} and "
-                     f"{result.get('num_turns', '?')} turns.")
-    if denied:
-        print(f"::warning title=Blocked tool calls::{len(denied)} blocked: " + "; ".join(denied)[:900])
-        lines += ["", f"**Blocked by the tool allow-list ({len(denied)}):**", ""]
-        lines += [f"- `{d}`" for d in denied]
-    text = "\n".join(lines) + "\n"
-    print(text)
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a") as fh:
-            fh.write(text + "\n")
-
-
 def decide(engine_ok, status, files, blocked, tests_passed):
     if not engine_ok:
         return "engine_error"
@@ -238,10 +293,12 @@ def cmd_report():
     tier_name = env["TIER"]
     tier = get_tier(tier_name)
     engine = env.get("ENGINE", "claude")
+    model = get_model(engine, tier_name)
+    base = env.get("BASE", "main")
+    branch = env.get("BRANCH", "")
     run_url = env.get("RUN_URL", "")
 
-    result = load_json(out / "engine-result.json", {}) or {}
-    engine_ok = bool(result) and not result.get("is_error", False)
+    result = engine_result(engine, out)
 
     status = read_text(out / "status").strip().upper() or "MISSING"
     if status not in VALID_STATUSES:
@@ -256,34 +313,37 @@ def cmd_report():
     tests = parse_test_log(verify_log)
     tests_passed = env.get("TESTS_PASSED") == "true"
 
-    outcome = decide(engine_ok, status, files, bool(blocked_files), tests_passed)
-    engine_error = engine_error_message(result)
-    denied = denied_commands(result)
+    outcome = decide(result["ok"], status, files, bool(blocked_files), tests_passed)
 
     if tests:
         test_line = (f"{'Passed' if tests_passed else 'FAILED'}: {tests['run']} tests, "
                      f"{tests['failures']} failures, {tests['errors']} errors")
     else:
         test_line = "Passed" if tests_passed else "FAILED (no test summary found)"
-    cost = result.get("total_cost_usd")
-    cost_line = f"${cost:.2f} (estimate)" if isinstance(cost, (int, float)) else "n/a"
-    turns = result.get("num_turns", "n/a")
-    duration = format_duration(result.get("duration_ms"))
-    skills = ", ".join(tier["skills"])
+    cost_line = f"${result['cost']:.2f} (estimate)" if result["cost"] is not None else "n/a"
+    turns = result["turns"] if result["turns"] is not None else "n/a"
 
     facts = [
-        ("Engine", f"{engine} (`{tier['model']}`)"),
-        ("Tier", f"{tier_name}: {skills}"),
+        ("Engine", f"{engine} (`{model}`)"),
+        ("Tier", f"{tier_name}: {', '.join(tier['skills'])}"),
+        ("Base branch", f"`{base}`"),
         ("Agent's status", status),
         ("Independent test run", test_line),
         ("Changes", f"{len(files)} files, +{additions} / -{deletions}"),
-        ("Engine time", f"{duration}, {turns} turns"),
+        ("Engine time", f"{format_duration(result['duration_ms'])}, {turns} turns"),
         ("Cost", cost_line),
     ]
     table = "| | |\n|---|---|\n" + "\n".join(f"| {k} | {v} |" for k, v in facts)
 
     number = issue.get("number", env.get("ISSUE", "?"))
     title = issue.get("title", "")
+    denied_section = []
+    if result["denied"]:
+        denied_section = ["## Blocked tool calls", "",
+                          "The engine tried these, and the tool allow-list blocked them:", ""]
+        denied_section += [f"- `{d}`" for d in result["denied"]] + [""]
+    footer = ["---", f"<sub>Generated by The Agent runner {RUNNER_VERSION}. "
+              "A human must review and approve before merging.</sub>"]
 
     # Pull request body
     lines = []
@@ -308,15 +368,10 @@ def cmd_report():
         excerpt = failure_excerpt(verify_log)
         if excerpt:
             lines += ["## Test failures", "", "```", excerpt, "```", ""]
-    if denied:
-        lines += ["## Blocked tool calls", "",
-                  "The engine tried these, and the tool allow-list blocked them:", ""]
-        lines += [f"- `{d}`" for d in denied] + [""]
-    lines += ["---", f"<sub>Generated by The Agent runner {RUNNER_VERSION}. "
-              "A human must review and approve before merging.</sub>"]
+    lines += denied_section + footer
     (out / "pr-body.md").write_text("\n".join(lines) + "\n")
 
-    # Issue comment, for outcomes that don't open a PR
+    # Issue comment, for outcomes that don't open a PR. Each one carries the same facts table.
     if outcome == "needs_info":
         comment = [f"**The Agent needs more information before it can work on this.** [Run log]({run_url})",
                    "", report_md or "_No details were provided._"]
@@ -328,14 +383,21 @@ def cmd_report():
                    f"{', '.join(f'`{f}`' for f in blocked_files)}. No pull request was opened. [Run log]({run_url})"]
     elif outcome == "engine_error":
         comment = [f"**The Agent's run failed** before producing a result. [Run log]({run_url})", "",
-                   f"Error: {engine_error}"]
+                   f"Error: {result['error']}"]
     else:
         comment = []
+    if comment:
+        comment += ["", "<details><summary>Run details</summary>", "", table, "", "</details>", ""]
+        comment += denied_section
     (out / "comment.md").write_text("\n".join(comment) + "\n")
 
-    # Commit message
+    # Pull request title and commit message
+    run_label = f"{engine}/{tier_name}" + ("" if base == "main" else f" on {base}")
+    pr_title = f"Fix #{number}: {title} [{run_label}]"
+    (out / "pr-title.txt").write_text(pr_title + "\n")
     commit = [f"Fix #{number}: {title}", "",
-              f"Engine: {engine} ({tier_name} tier, model {tier['model']})",
+              f"Engine: {engine} ({tier_name} tier, model {model})",
+              f"Base: {base}",
               f"Run: {run_url}"]
     (out / "commit-msg.txt").write_text("\n".join(commit) + "\n")
 
@@ -344,12 +406,15 @@ def cmd_report():
         "runner_version": RUNNER_VERSION,
         "run_id": env.get("GITHUB_RUN_ID"),
         "run_url": run_url,
+        "trigger": env.get("TRIGGER", "workflow_dispatch"),
         "issue": number,
         "issue_title": title,
         "engine": engine,
         "tier": tier_name,
-        "model": tier["model"],
+        "model": model,
         "skills": tier["skills"],
+        "base": base,
+        "branch": branch,
         "outcome": outcome,
         "agent_status": status,
         "tests_passed": tests_passed,
@@ -358,11 +423,12 @@ def cmd_report():
         "additions": additions,
         "deletions": deletions,
         "blocked_files": blocked_files,
-        "engine_duration_ms": result.get("duration_ms"),
-        "engine_turns": result.get("num_turns"),
-        "cost_usd_estimate": cost,
-        "engine_error": engine_error,
-        "denied_tool_calls": denied,
+        "engine_exit_code": result["exit_code"],
+        "engine_duration_ms": result["duration_ms"],
+        "engine_turns": result["turns"],
+        "cost_usd_estimate": result["cost"],
+        "engine_error": result["error"],
+        "denied_tool_calls": result["denied"],
         "pr_url": None,
     }
     (out / "record.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -384,10 +450,10 @@ def main(argv):
     if len(argv) < 2:
         fail(__doc__)
     command, args = argv[1], argv[2:]
-    if command == "check-issue" and len(args) == 1:
-        cmd_check_issue(args[0])
-    elif command == "tier" and len(args) == 1:
-        cmd_tier(args[0])
+    if command == "check-issue" and len(args) in (1, 2):
+        cmd_check_issue(*args)
+    elif command == "tier" and len(args) == 2:
+        cmd_tier(args[0], args[1])
     elif command == "prompt" and len(args) == 2:
         cmd_prompt(args[0], args[1])
     elif command == "engine-summary" and not args:

@@ -1,7 +1,7 @@
 name: The Agent
 
-# Runner v0.1: fix one GitHub issue and open a pull request.
-# Start it from the Actions tab: The Agent -> Run workflow -> enter an issue number.
+# Runner v0.2: fix one GitHub issue and open a pull request.
+# Start it from the Actions tab (The Agent -> Run workflow), or add the `agent-ready` label to an issue.
 # See .agent/README.md for how it works and what it needs.
 
 on:
@@ -21,6 +21,12 @@ on:
         type: choice
         options: [fast, standard, deep]
         default: standard
+      base:
+        description: "Branch the agent works on and opens its PR against (eval/baseline for comparisons)"
+        type: string
+        default: main
+  issues:
+    types: [labeled]
 
 # The workflow's own token can only read. Everything that writes to GitHub
 # uses a short-lived token from The Agent's GitHub App instead.
@@ -28,27 +34,47 @@ permissions:
   contents: read
 
 concurrency:
-  group: the-agent-issue-${{ inputs.issue }}
+  group: the-agent-${{ inputs.issue || github.event.issue.number }}-${{ inputs.engine || 'claude' }}-${{ inputs.tier || 'standard' }}-${{ inputs.base || 'main' }}
   cancel-in-progress: false
 
 jobs:
   run:
-    name: "Issue #${{ inputs.issue }} (${{ inputs.engine }}, ${{ inputs.tier }})"
+    # Manual runs always go; label events only for the agent-ready label.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'agent-ready'
+    name: "Issue #${{ inputs.issue || github.event.issue.number }} (${{ inputs.engine || 'claude' }}, ${{ inputs.tier || 'standard' }})"
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
-      ISSUE: ${{ inputs.issue }}
-      ENGINE: ${{ inputs.engine }}
-      TIER: ${{ inputs.tier }}
-      OUT: ${{ github.workspace }}/.agent-out
+      ISSUE: ${{ inputs.issue || github.event.issue.number }}
+      ENGINE: ${{ inputs.engine || 'claude' }}
+      TIER: ${{ inputs.tier || 'standard' }}
+      BASE: ${{ inputs.base || 'main' }}
+      TRIGGER: ${{ github.event_name }}
+      OUT: ${{ github.workspace }}/work/.agent-out
+      RUNNER_PY: ${{ github.workspace }}/runner/.agent/runner.py
+      SKILLS_DIR: ${{ github.workspace }}/runner/.agent/skills
       REPO: ${{ github.repository }}
-      BRANCH: the-agent/issue-${{ inputs.issue }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    defaults:
+      run:
+        working-directory: work
 
     steps:
-      - name: Check out the repository
+      # The code the agent works on: main, or a fixed baseline branch for comparisons.
+      - name: Check out the code to work on
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.BASE }}
+          path: work
+          persist-credentials: false
+
+      # The runner itself always comes from the branch the workflow runs from (main), so a baseline
+      # branch can hold only the original code. It sits outside the agent's working folder.
+      - name: Check out the runner
+        uses: actions/checkout@v4
+        with:
+          path: runner
+          sparse-checkout: .agent
           persist-credentials: false
 
       - name: Set up Java 21
@@ -57,6 +83,7 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+          cache-dependency-path: work/pom.xml
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -76,20 +103,30 @@ jobs:
         run: |
           mkdir -p "$OUT"
           gh api "repos/$REPO/issues/$ISSUE" > "$OUT/issue.json"
-          python3 .agent/runner.py check-issue "$OUT/issue.json"
+          # Comparison runs on a baseline branch may use issues already fixed (and closed) on main.
+          allow_closed=$([ "$BASE" = "main" ] && echo no || echo yes)
+          python3 "$RUNNER_PY" check-issue "$OUT/issue.json" "$allow_closed"
 
       - name: Load tier settings
         id: tier
-        run: python3 .agent/runner.py tier "$TIER" >> "$GITHUB_OUTPUT"
+        run: python3 "$RUNNER_PY" tier "$TIER" "$ENGINE" >> "$GITHUB_OUTPUT"
+
+      - name: Name the branch
+        run: |
+          # One branch per issue, engine, tier and base, so comparison runs don't overwrite each other.
+          branch="the-agent/issue-${ISSUE}-${ENGINE}-${TIER}"
+          if [ "$BASE" != "main" ]; then branch="${branch}-on-${BASE//\//-}"; fi
+          echo "BRANCH=$branch" >> "$GITHUB_ENV"
+          echo "Branch: $branch"
 
       - name: Comment that The Agent has started
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           gh issue comment "$ISSUE" --repo "$REPO" --body \
-            "**The Agent is working on this issue** (engine: $ENGINE, tier: $TIER). [Follow the run]($RUN_URL)"
+            "**The Agent is working on this issue** (engine: $ENGINE, tier: $TIER, base: \`$BASE\`). [Follow the run]($RUN_URL)"
 
-      - name: Check that main passes its tests before any changes
+      - name: Check that the base branch passes its tests before any changes
         run: mvn -B -q test
 
       - name: Prepare the workspace
@@ -99,16 +136,16 @@ jobs:
           mkdir -p .claude/skills
           IFS=',' read -ra SKILLS <<< "${{ steps.tier.outputs.skills }}"
           for skill in "${SKILLS[@]}"; do
-            cp -r ".agent/skills/$skill" .claude/skills/
+            cp -r "$SKILLS_DIR/$skill" .claude/skills/
           done
-          python3 .agent/runner.py prompt "$OUT/issue.json" "$TIER" > "$OUT/prompt.md"
+          python3 "$RUNNER_PY" prompt "$OUT/issue.json" "$TIER" > "$OUT/prompt.md"
           echo "Skills for this run: ${SKILLS[*]}"
 
       # The engine gets the code and its model credential, and nothing else:
       # no GitHub token is in its environment.
       - name: Run the engine (Claude Code)
         id: engine
-        if: inputs.engine == 'claude'
+        if: env.ENGINE == 'claude'
         timeout-minutes: 35
         env:
           OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -130,6 +167,7 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version
 
+          # Every engine's exit code and stderr are saved, so even an unfamiliar failure explains itself.
           set +e
           claude -p "$(cat "$OUT/prompt.md")" \
             --model "${{ steps.tier.outputs.model }}" \
@@ -137,13 +175,15 @@ jobs:
             --permission-mode dontAsk \
             --permission-prompts none \
             --allowedTools "Read,Edit,Write,Glob,Grep,Skill,TodoWrite,Bash(mvn *),Bash(./mvnw *)" \
-            --output-format json > "$OUT/engine-result.json"
-          echo "Engine exit code: $?"
+            --output-format json > "$OUT/engine-result.json" 2> >(tee "$OUT/engine-stderr.log" >&2)
+          code=$?
+          echo "$code" > "$OUT/engine-exit-code"
+          echo "Engine exit code: $code"
           exit 0
 
       - name: Summarize the engine result
         if: always() && steps.engine.outcome != 'skipped' && steps.engine.outcome != ''
-        run: python3 .agent/runner.py engine-summary
+        run: python3 "$RUNNER_PY" engine-summary
 
       - name: Verify the change independently
         id: verify
@@ -166,7 +206,7 @@ jobs:
         env:
           TESTS_PASSED: ${{ steps.verify.outputs.passed }}
           GITHUB_RUN_ID: ${{ github.run_id }}
-        run: python3 .agent/runner.py report
+        run: python3 "$RUNNER_PY" report
 
       - name: Push the branch and open the pull request
         id: pr
@@ -182,7 +222,7 @@ jobs:
           git commit -q -F "$OUT/commit-msg.txt"
           git push --force -q "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"
 
-          title=$(head -n 1 "$OUT/commit-msg.txt")
+          title=$(head -n 1 "$OUT/pr-title.txt")
           existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --repo "$REPO" --title "$title" --body-file "$OUT/pr-body.md"
@@ -195,7 +235,7 @@ jobs:
           else
             draft_flag=""
             if [ "$OUTCOME" = "pr_draft" ]; then draft_flag="--draft"; fi
-            url=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+            url=$(gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
               --title "$title" --body-file "$OUT/pr-body.md" $draft_flag)
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
@@ -232,15 +272,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: the-agent-issue-${{ inputs.issue }}-run-${{ github.run_id }}
+          name: the-agent-issue-${{ env.ISSUE }}-${{ env.ENGINE }}-${{ env.TIER }}-run-${{ github.run_id }}
           path: |
-            .agent-out/record.json
-            .agent-out/report.md
-            .agent-out/status
-            .agent-out/prompt.md
-            .agent-out/engine-result.json
-            .agent-out/verify.log
-            .agent-out/pr-body.md
+            work/.agent-out/record.json
+            work/.agent-out/report.md
+            work/.agent-out/status
+            work/.agent-out/prompt.md
+            work/.agent-out/engine-result.json
+            work/.agent-out/engine-stderr.log
+            work/.agent-out/engine-exit-code
+            work/.agent-out/verify.log
+            work/.agent-out/pr-body.md
           if-no-files-found: ignore
 
       - name: Fail the job when the run didn't work

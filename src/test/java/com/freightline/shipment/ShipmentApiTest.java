@@ -73,6 +73,22 @@ class ShipmentApiTest {
     }
 
     @Test
+    void rejectsZeroWeight() throws Exception {
+        mvc.perform(post("/api/shipments")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_SHIPMENT.replace("12.5", "0")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsNegativeWeight() throws Exception {
+        mvc.perform(post("/api/shipments")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_SHIPMENT.replace("12.5", "-5")))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void getsShipmentById() throws Exception {
         long id = createShipment();
 

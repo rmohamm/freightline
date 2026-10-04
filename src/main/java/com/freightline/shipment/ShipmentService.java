@@ -91,7 +91,7 @@ public class ShipmentService {
 
     @Transactional(readOnly = true)
     public List<ShipmentSummary> summary() {
-        return shipments.findAll().stream()
+        return shipments.findAllWithCarrierAndEvents().stream()
                 .map(s -> {
                     List<ShipmentEvent> events = s.getEvents();
                     ShipmentEvent last = events.isEmpty() ? null : events.get(events.size() - 1);

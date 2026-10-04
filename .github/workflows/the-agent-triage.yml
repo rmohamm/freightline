@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       issues:
-        description: "Issue numbers: a list (1,2,5), a range (1-8), or both (1-3,7)"
+        description: "Any issue numbers, as a list, range, or both: e.g. 12 or 3,17,40 or 20-45 or 1-3,7 (up to 51 per range)"
         required: true
         type: string
 
@@ -59,10 +59,30 @@ jobs:
           print(" ".join(map(str, out)))
           EOF
           )"
+          found=""
+          missing=""
           for n in $numbers; do
-            gh api "repos/$REPO/issues/$n" > "$OUT/issues/$n.json"
+            if gh api "repos/$REPO/issues/$n" > "$OUT/issues/$n.json" 2> "$OUT/gh-error.txt"; then
+              found="$found $n"
+            elif grep -qE 'HTTP (404|410)' "$OUT/gh-error.txt"; then
+              # 404: no issue or PR has this number. 410: the issue was deleted.
+              rm -f "$OUT/issues/$n.json"
+              missing="$missing $n"
+            else
+              cat "$OUT/gh-error.txt" >&2
+              echo "::error title=Triage::Could not read issue #$n from GitHub"
+              exit 1
+            fi
           done
-          echo "Read issues: $numbers"
+          rm -f "$OUT/gh-error.txt"
+          if [ -n "$missing" ]; then
+            echo "::warning title=Issues not found::Skipped, no such issue:$missing"
+          fi
+          if [ -z "$found" ]; then
+            echo "::error title=Triage::None of the requested issues exist ($ISSUES)"
+            exit 1
+          fi
+          echo "Read issues:$found"
 
       - name: Triage with Jev
         env:

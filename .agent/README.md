@@ -132,7 +132,7 @@ The routing call is `needs_info` when P(ready) is under 50%, otherwise the chose
 
 This step is **triage only**: it posts nothing to GitHub and starts no engine. It exists to measure whether Jev's calls are good before they're allowed to choose a tier for a real run.
 
-Run it from **Actions → The Agent – triage → Run workflow** with a list or range of issue numbers (`1-8`, `1,2,5`), or:
+Run it from **Actions → The Agent – triage → Run workflow** with any issue numbers, as a list, a range, or both (`12`, `3,17,40`, `20-45`, `1-3,7`; up to 51 numbers per range). Numbers that belong to pull requests, or that don't exist, are skipped with a warning. Or from the terminal:
 
 ```bash
 gh workflow run the-agent-triage.yml --repo rmohamm/freightline -f issues=1-8
